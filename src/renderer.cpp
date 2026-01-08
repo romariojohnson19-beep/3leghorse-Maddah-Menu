@@ -89,12 +89,22 @@ void set_theme_gold_black() {
 }
 
 void draw_overlay() {
-    if (!g_initialized || !g_imgui_ready) return;
+    if (!g_initialized || !g_imgui_ready) {
+        OutputDebugStringA("[renderer] draw_overlay called but not ready\n");
+        return;
+    }
+
+    OutputDebugStringA("[renderer] Drawing overlay\n");
 
     ImGui::SetNextWindowBgAlpha(0.35f);
     ImGui::Begin("3leghorse Overlay", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings |
         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
+    
+    // Test message - make it very visible
+    ImGui::TextColored(ImVec4(1,0,0,1), "=== 3LEGHORSE MENU LOADED ===");
+    ImGui::TextColored(ImVec4(0,1,0,1), "Press F11 to toggle visibility");
+    ImGui::Separator();
     ImGui::Text("3leghorse Menu v1.0");
     ImGui::TextColored(ImVec4(1,1,0,1), "Blocked Events: %u", protections::blocked_count());
     ImGui::End();

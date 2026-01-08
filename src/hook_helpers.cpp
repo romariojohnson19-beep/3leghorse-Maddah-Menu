@@ -5,6 +5,7 @@
 #if defined(ENABLE_IMGUI)
 #include <d3d11.h>
 #include <dxgi.h>
+#include <cstdio>
 #include "../external/imgui/imgui.h"
 #include "../external/imgui/backends/imgui_impl_win32.h"
 
@@ -17,6 +18,15 @@ bool on_present(IDXGISwapChain* swap_chain) {
     if (!swap_chain) return false;
 
     static bool initialized = false;
+    static int frame_count = 0;
+    frame_count++;
+
+    // Debug output every 100 frames to avoid spam
+    if (frame_count % 100 == 0) {
+        char buf[128];
+        sprintf(buf, "[hook_helpers] on_present called - frame %d, initialized: %d\n", frame_count, initialized);
+        OutputDebugStringA(buf);
+    }
 
     ID3D11Device* device = nullptr;
     ID3D11DeviceContext* context = nullptr;
@@ -27,7 +37,13 @@ bool on_present(IDXGISwapChain* swap_chain) {
         device->GetImmediateContext(&context);
         if (SUCCEEDED(swap_chain->GetDesc(&desc))) {
             if (!initialized) {
+                OutputDebugStringA("[hook_helpers] Initializing ImGui\n");
                 initialized = renderer::imgui_init(desc.OutputWindow, device, context);
+                if (initialized) {
+                    OutputDebugStringA("[hook_helpers] ImGui initialized successfully\n");
+                } else {
+                    OutputDebugStringA("[hook_helpers] ImGui initialization failed\n");
+                }
             }
             ok = renderer::on_present();
         }

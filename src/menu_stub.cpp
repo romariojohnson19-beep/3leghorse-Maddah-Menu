@@ -1,6 +1,7 @@
 #include "menu_stub.hpp"
 
 #include <windows.h>
+#include <cstdio>
 
 #include <atomic>
 #include <chrono>
@@ -60,7 +61,22 @@ void tick_loop() {
         // Hotkey handler: toggle overlay (rendering happens in Present hook)
         int vk = cfg::get().toggle_hotkey;
         if (GetAsyncKeyState(vk) & 1) {
-            g_overlay_visible.store(!g_overlay_visible.load());
+            bool new_visibility = !g_overlay_visible.load();
+            g_overlay_visible.store(new_visibility);
+            char buf[128];
+            sprintf(buf, "[menu_stub] Hotkey pressed! Overlay visibility: %d\n", new_visibility);
+            OutputDebugStringA(buf);
+        }
+
+        // Debug output every 5 seconds
+        static auto last_debug = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - last_debug).count() >= 5) {
+            char buf[128];
+            sprintf(buf, "[menu_stub] Tick loop running, overlay visible: %d, hotkey: 0x%X\n",
+                   g_overlay_visible.load(), vk);
+            OutputDebugStringA(buf);
+            last_debug = now;
         }
         std::this_thread::sleep_for(200ms);
     }
