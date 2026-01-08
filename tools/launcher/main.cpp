@@ -65,7 +65,7 @@ int main(int argc, char* argv[]) {
 
     if (argc < 2) {
         std::cout << "Usage: launcher.exe <dll_path> [process_name_or_exe]\n";
-        std::cout << "Example: launcher.exe 3leghorse.dll GTA5.exe\n";
+        std::cout << "Example: launcher.exe 3leghorse.dll PlayGTAV.exe\n";
         std::cout << "Press Enter to exit...\n";
         std::cin.get();
         return 1;
@@ -74,7 +74,7 @@ int main(int argc, char* argv[]) {
     std::string dllPathUtf8 = argv[1];
     fs::path dllPath = fs::path(dllPathUtf8);  // Handles UTF-8 correctly without u8path
 
-    std::string targetArg = (argc >= 3) ? argv[2] : "GTA5.exe";
+    std::string targetArg = (argc >= 3) ? argv[2] : "PlayGTAV.exe";
 
     EnableSeDebug();
 
