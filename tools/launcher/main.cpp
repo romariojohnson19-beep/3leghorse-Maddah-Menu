@@ -10,19 +10,19 @@
 
 namespace fs = std::filesystem;
 
-// Helper: Convert UTF-8 std::string to wide string
+// Convert UTF-8 std::string to wide string (std::wstring)
 static std::wstring Utf8ToWide(const std::string& utf8) {
     if (utf8.empty()) return {};
-    int size = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), (int)utf8.size(), nullptr, 0);
-    std::wstring wide(size, 0);
-    MultiByteToWideChar(CP_UTF8, 0, utf8.data(), (int)utf8.size(), wide.data(), size);
+    int size = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+    std::wstring wide(size - 1, 0);
+    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, wide.data(), size);
     return wide;
 }
 
 bool EnableSeDebug() {
     HANDLE token;
     TOKEN_PRIVILEGES tp;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &token))
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token))
         return false;
     LookupPrivilegeValue(nullptr, SE_DEBUG_NAME, &tp.Privileges[0].Luid);
     tp.PrivilegeCount = 1;
@@ -49,21 +49,13 @@ DWORD GetPID(const std::wstring& name) {
     return 0;
 }
 
-// Very basic manual map (only for demonstration - not production ready)
-bool ManualMap(HANDLE proc, const std::vector<BYTE>& data) {
-    std::cout << "[!] Manual map not implemented in this version.\n";
-    std::cout << "[!] Using fallback LoadLibrary injection.\n";
-    return false;
-}
-
-static bool ReadDLL(const std::string& path, std::vector<BYTE>& out) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return false;
-    f.seekg(0, std::ios::end);
-    std::streamsize n = f.tellg();
-    f.seekg(0, std::ios::beg);
-    out.resize(static_cast<size_t>(n));
-    if (n > 0) f.read(reinterpret_cast<char*>(out.data()), n);
+bool ReadDLL(const std::string& path, std::vector<BYTE>& out) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return false;
+    file.seekg(0, std::ios::end);
+    out.resize(file.tellg());
+    file.seekg(0);
+    file.read(reinterpret_cast<char*>(out.data()), out.size());
     return true;
 }
 
@@ -71,42 +63,55 @@ int main(int argc, char* argv[]) {
     SetConsoleTitleA("3leghorse Launcher");
 
     if (argc < 2) {
-        std::cout << "Usage: launcher.exe <dll_path> [process_name or exe_path]\n";
+        std::cout << "Usage: launcher.exe <dll_path> [process_name_or_exe]\n";
         std::cout << "Example: launcher.exe 3leghorse.dll GTA5.exe\n";
         std::cout << "Press Enter to exit...\n";
         std::cin.get();
         return 1;
     }
 
-    std::string dllPath = argv[1];
+    std::string dllPathUtf8 = argv[1];
+    fs::path dllPath = fs::path(dllPathUtf8);  // Handles UTF-8 correctly without u8path
 
     std::string targetArg = (argc >= 3) ? argv[2] : "GTA5.exe";
 
     EnableSeDebug();
+
+    std::cout << "[+] Resolving DLL path: " << dllPath << "\n";
+
+    if (!fs::exists(dllPath)) {
+        std::cout << "[!] DLL not found: " << dllPath << "\n";
+        std::cout << "Press Enter to exit...\n";
+        std::cin.get();
+        return 1;
+    }
 
     std::cout << "[+] Looking for target: " << targetArg << "\n";
 
     DWORD pid = 0;
     fs::path targetPath = targetArg;
 
-    if (fs::exists(targetPath) && fs::is_regular_file(targetPath)) {
-        // Try to start executable
+    // If target is a full exe path and it exists, launch it
+    if (fs::exists(targetPath) && targetPath.extension() == ".exe") {
         std::cout << "[+] Starting executable: " << targetArg << "\n";
         ShellExecuteA(nullptr, "open", targetArg.c_str(), nullptr, nullptr, SW_SHOW);
-        std::this_thread::sleep_for(std::chrono::seconds(8)); // wait a bit
+        std::this_thread::sleep_for(std::chrono::seconds(10)); // Wait for load
     }
 
-    // Try to find running process
+    // Find PID
     std::wstring wTarget = Utf8ToWide(targetArg);
     pid = GetPID(wTarget);
-    if (pid == 0 && targetArg.find(".exe") != std::string::npos) {
-        // Try stripping .exe for name
-        std::wstring wName = Utf8ToWide(targetArg.substr(0, targetArg.find_last_of('.')));
-        pid = GetPID(wName);
+
+    if (pid == 0) {
+        // Try without .exe extension
+        std::string nameNoExt = targetArg;
+        if (nameNoExt.size() >= 4 && nameNoExt.substr(nameNoExt.size() - 4) == ".exe")
+            nameNoExt.erase(nameNoExt.size() - 4);
+        pid = GetPID(Utf8ToWide(nameNoExt));
     }
 
     if (pid == 0) {
-        std::cout << "[!] Could not find running process '" << targetArg << "'\n";
+        std::cout << "[!] Could not find running process: " << targetArg << "\n";
         std::cout << "Press Enter to exit...\n";
         std::cin.get();
         return 1;
@@ -122,22 +127,21 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Try LoadLibrary first
-    size_t pathSize = dllPath.size() + 1;
+    // LoadLibrary injection attempt
+    std::string dllPathStr = dllPath.string(); // Normal UTF-8 string
+    size_t pathSize = dllPathStr.size() + 1;
     LPVOID alloc = VirtualAllocEx(proc, nullptr, pathSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!alloc) {
         std::cout << "[!] VirtualAllocEx failed. Error: " << GetLastError() << "\n";
         CloseHandle(proc);
-        std::cout << "Press Enter to exit...\n";
         std::cin.get();
         return 1;
     }
 
-    if (!WriteProcessMemory(proc, alloc, dllPath.c_str(), pathSize, nullptr)) {
+    if (!WriteProcessMemory(proc, alloc, dllPathStr.c_str(), pathSize, nullptr)) {
         std::cout << "[!] WriteProcessMemory failed. Error: " << GetLastError() << "\n";
         VirtualFreeEx(proc, alloc, 0, MEM_RELEASE);
         CloseHandle(proc);
-        std::cout << "Press Enter to exit...\n";
         std::cin.get();
         return 1;
     }
@@ -148,22 +152,14 @@ int main(int argc, char* argv[]) {
         CloseHandle(thread);
         std::cout << "[+] Injected successfully via LoadLibrary!\n";
     } else {
-        std::cout << "[!] CreateRemoteThread failed. Error: " << GetLastError() << "\n";
-        std::cout << "[!] Trying manual map fallback...\n";
-        std::vector<BYTE> dllData;
-        if (!ReadDLL(dllPath, dllData)) {
-            std::cout << "[!] Could not read DLL file\n";
-        } else if (ManualMap(proc, dllData)) {
-            std::cout << "[+] Manual map success!\n";
-        } else {
-            std::cout << "[!] Manual map also failed\n";
-        }
+        std::cout << "[!] LoadLibrary injection failed. Error: " << GetLastError() << "\n";
+        std::cout << "[!] Manual map fallback not implemented yet.\n";
     }
 
     VirtualFreeEx(proc, alloc, 0, MEM_RELEASE);
     CloseHandle(proc);
 
-    std::cout << "\nPress Enter to exit...\n";
+    std::cout << "\n[+] Injection complete. Press Enter to exit...\n";
     std::cin.get();
     return 0;
 }
