@@ -1,10 +1,22 @@
 #include <windows.h>
+#include <string>
+
+// Keep console open and verbose for debugging the injector
+BOOL WINAPI ConsoleCtrlHandler(DWORD ctrl) {
+    if (ctrl == CTRL_CLOSE_EVENT) {
+        printf("Exit requested - holding for debug...\n");
+        Sleep(5000); // give time to copy output
+    }
+    return TRUE;
+}
+
 #include <tlhelp32.h>
 #include <iostream>
 #include <fstream>
 #include <vector>
-#include <string>
 #include <cstring>
+#include <cstdio>
+#include <exception>
 
 // Enable SeDebugPrivilege for better handle access
 bool EnableSeDebug() {
@@ -143,68 +155,97 @@ bool ManualMap(HANDLE proc, const std::vector<BYTE>& dllData) {
     return true;
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char* argv[]) {
+    SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
+    SetConsoleTitleA("3leghorse Injector Debug");
+    freopen("CONOUT$", "w", stdout);
+    freopen("CONOUT$", "w", stderr);
+    printf("[+] 3leghorse Debug Mode Enabled\n");
+
     if (argc < 3) {
-        std::cout << "Usage: dll_injector <dll_path> <process_name>\n";
-        std::cout << "Example: dll_injector C:/temp/YimMenuCustom.dll GTA5.exe\n";
+        printf("[!] Usage: launcher.exe <dll_path> <process_name>\n");
+        printf("[?] Example: launcher.exe C:\\path\\3leghorse.dll GTA5.exe\n");
+        system("pause");
         return 1;
     }
 
     std::string dllPath = argv[1];
-    std::wstring procName(argv[2], argv[2] + std::strlen(argv[2]));
+    std::string procNameUtf8 = argv[2];
+    std::wstring procName(procNameUtf8.begin(), procNameUtf8.end());
 
-    EnableSeDebug();
-
-    std::ifstream file(dllPath, std::ios::binary);
-    if (!file) {
-        std::cout << "Failed to open DLL file\n";
-        return 1;
-    }
-    std::vector<BYTE> dllData((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    if (dllData.empty()) {
-        std::cout << "DLL file empty\n";
-        return 1;
-    }
-
-    DWORD pid = GetPID(procName);
-    if (!pid) {
-        std::cout << "Process not found\n";
-        return 1;
-    }
-
-    HANDLE proc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-    if (!proc) {
-        std::cout << "OpenProcess failed\n";
-        return 1;
-    }
-
-    // Try LoadLibrary first
-    SIZE_T pathSize = dllPath.size() + 1;
-    LPVOID alloc = VirtualAllocEx(proc, nullptr, pathSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (alloc && WriteProcessMemory(proc, alloc, dllPath.c_str(), pathSize, nullptr)) {
-        HANDLE thread = CreateRemoteThread(proc, nullptr, 0, (LPTHREAD_START_ROUTINE)LoadLibraryA, alloc, 0, nullptr);
-        if (thread) {
-            WaitForSingleObject(thread, INFINITE);
-            CloseHandle(thread);
-            std::cout << "Injected via LoadLibrary\n";
-            VirtualFreeEx(proc, alloc, 0, MEM_RELEASE);
-            CloseHandle(proc);
-            return 0;
+    try {
+        if (!EnableSeDebug()) {
+            printf("[!] EnableSeDebug failed (continuing). LastError: %lu\n", GetLastError());
         }
-    }
-    std::cout << "LoadLibrary path failed, trying manual map...\n";
 
-    if (alloc) VirtualFreeEx(proc, alloc, 0, MEM_RELEASE);
+        std::ifstream file(dllPath, std::ios::binary);
+        if (!file) {
+            printf("[!] Failed to open DLL file: %s\n", dllPath.c_str());
+            system("pause");
+            return 1;
+        }
+        std::vector<BYTE> dllData((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        if (dllData.empty()) {
+            printf("[!] DLL file empty: %s\n", dllPath.c_str());
+            system("pause");
+            return 1;
+        }
 
-    if (ManualMap(proc, dllData)) {
-        std::cout << "Manual map success!\n";
-    } else {
-        std::cout << "Manual map failed\n";
+        DWORD pid = GetPID(procName);
+        if (!pid) {
+            printf("[!] Process '%s' not found.\n", procNameUtf8.c_str());
+            system("pause");
+            return 1;
+        }
+
+        HANDLE proc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+        if (!proc) {
+            printf("[!] OpenProcess failed. LastError: %lu\n", GetLastError());
+            system("pause");
+            return 1;
+        }
+        printf("[+] Target PID: %lu\n", pid);
+
+        // Try LoadLibrary first
+        SIZE_T pathSize = dllPath.size() + 1;
+        LPVOID alloc = VirtualAllocEx(proc, nullptr, pathSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (alloc && WriteProcessMemory(proc, alloc, dllPath.c_str(), pathSize, nullptr)) {
+            printf("[ ] Attempting LoadLibrary path...\n");
+            HANDLE thread = CreateRemoteThread(proc, nullptr, 0, (LPTHREAD_START_ROUTINE)LoadLibraryA, alloc, 0, nullptr);
+            if (thread) {
+                WaitForSingleObject(thread, INFINITE);
+                CloseHandle(thread);
+                printf("[+] Injected via LoadLibrary\n");
+                VirtualFreeEx(proc, alloc, 0, MEM_RELEASE);
+                CloseHandle(proc);
+                printf("[!] Injection complete — press any key to exit.\n");
+                system("pause");
+                return 0;
+            }
+            printf("[!] LoadLibrary thread creation failed. LastError: %lu\n", GetLastError());
+        }
+        printf("[ ] LoadLibrary path failed, trying manual map...\n");
+
+        if (alloc) VirtualFreeEx(proc, alloc, 0, MEM_RELEASE);
+
+        if (ManualMap(proc, dllData)) {
+            printf("[+] Manual map success!\n");
+        } else {
+            printf("[!] Manual map failed\n");
+            CloseHandle(proc);
+            system("pause");
+            return 1;
+        }
+
         CloseHandle(proc);
-        return 1;
+    } catch (const std::exception& e) {
+        printf("[!] Exception: %s\n", e.what());
+    } catch (...) {
+        printf("[!] Unknown error during injection.\n");
     }
 
-    CloseHandle(proc);
+    printf("[!] Injection complete — press any key to exit.\n");
+    system("pause");
     return 0;
 }
 

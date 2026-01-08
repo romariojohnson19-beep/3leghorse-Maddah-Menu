@@ -1,0 +1,7 @@
+C:/Users/ASZIAM/Desktop/ROKOT/Maddah Menu/tools/launcher/build/CMakeFiles/menu_launcher.dir
+C:/Users/ASZIAM/Desktop/ROKOT/Maddah Menu/tools/launcher/build/CMakeFiles/edit_cache.dir
+C:/Users/ASZIAM/Desktop/ROKOT/Maddah Menu/tools/launcher/build/CMakeFiles/rebuild_cache.dir
+C:/Users/ASZIAM/Desktop/ROKOT/Maddah Menu/tools/launcher/build/CMakeFiles/list_install_components.dir
+C:/Users/ASZIAM/Desktop/ROKOT/Maddah Menu/tools/launcher/build/CMakeFiles/install.dir
+C:/Users/ASZIAM/Desktop/ROKOT/Maddah Menu/tools/launcher/build/CMakeFiles/install/local.dir
+C:/Users/ASZIAM/Desktop/ROKOT/Maddah Menu/tools/launcher/build/CMakeFiles/install/strip.dir
