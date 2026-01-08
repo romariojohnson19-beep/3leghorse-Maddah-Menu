@@ -1,5 +1,6 @@
 #include "hook_helpers.hpp"
 #include "renderer.hpp"
+#include "menu_stub.hpp"
 
 #if defined(ENABLE_IMGUI)
 #include <d3d11.h>
@@ -28,7 +29,9 @@ bool on_present(IDXGISwapChain* swap_chain) {
             if (!initialized) {
                 initialized = renderer::imgui_init(desc.OutputWindow, device, context);
             }
-            renderer::draw_overlay();
+            if (menu_stub::overlay_visible()) {
+                renderer::draw_overlay();
+            }
             ok = true;
         }
     }

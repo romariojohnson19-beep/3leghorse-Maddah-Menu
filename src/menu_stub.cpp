@@ -13,6 +13,7 @@
 #include "protections.hpp"
 #include "renderer.hpp"
 #include "config.hpp"
+#include "hooks/present_hook.hpp"
 
 namespace {
 std::atomic_bool g_running{false};
@@ -56,12 +57,11 @@ void tick_loop() {
                 }
             }
         }
-        // Hotkey handler: toggle overlay
+        // Hotkey handler: toggle overlay (rendering happens in Present hook)
         int vk = cfg::get().toggle_hotkey;
         if (GetAsyncKeyState(vk) & 1) {
             g_overlay_visible.store(!g_overlay_visible.load());
         }
-        if (g_overlay_visible.load()) renderer::draw_overlay();
         std::this_thread::sleep_for(200ms);
     }
     log("[YimMenuCustom] tick loop stop\n");
@@ -78,6 +78,7 @@ void init() {
     native_interface::init();
     protections::init();
     renderer::init();
+    hooks::init_present_hook();
     log("[YimMenuCustom] init called\n");
     g_worker = std::thread(tick_loop);
 }
@@ -93,6 +94,7 @@ void shutdown() {
     native_interface::shutdown();
     protections::shutdown();
     renderer::shutdown();
+    hooks::shutdown_present_hook();
     log("[YimMenuCustom] shutdown complete\n");
 }
 

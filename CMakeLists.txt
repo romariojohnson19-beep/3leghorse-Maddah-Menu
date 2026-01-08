@@ -30,6 +30,7 @@ add_library(YimMenuCustom SHARED
     src/renderer.cpp
     src/config.cpp
     src/hook_helpers.cpp
+    src/hooks/present_hook.cpp
 )
 
 target_include_directories(YimMenuCustom PRIVATE include)
