@@ -39,7 +39,17 @@ LRESULT CALLBACK wndproc_hook(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 }
 
 HRESULT __stdcall hk_present(IDXGISwapChain* swap_chain, UINT sync_interval, UINT flags) {
+    static int call_count = 0;
+    call_count++;
+    
+    if (call_count % 100 == 0) {
+        char buf[128];
+        sprintf(buf, "[hk_present] Present called %d times\n", call_count);
+        OutputDebugStringA(buf);
+    }
+
     if (!swap_chain) {
+        OutputDebugStringA("[hk_present] No swap chain!\n");
         return g_orig_present ? g_orig_present(swap_chain, sync_interval, flags) : S_OK;
     }
 
@@ -47,8 +57,12 @@ HRESULT __stdcall hk_present(IDXGISwapChain* swap_chain, UINT sync_interval, UIN
         DXGI_SWAP_CHAIN_DESC desc{};
         if (SUCCEEDED(swap_chain->GetDesc(&desc))) {
             g_hwnd = desc.OutputWindow;
+            char buf[128];
+            sprintf(buf, "[hk_present] Got window handle: %p\n", g_hwnd);
+            OutputDebugStringA(buf);
             if (g_hwnd && !g_orig_wndproc) {
                 g_orig_wndproc = (WNDPROC)SetWindowLongPtr(g_hwnd, GWLP_WNDPROC, (LONG_PTR)wndproc_hook);
+                OutputDebugStringA("[hk_present] Installed WndProc hook\n");
             }
         }
     }
@@ -106,23 +120,38 @@ namespace hooks {
 
 bool init_present_hook() {
 #if HAVE_MINHOOK
-    if (g_hooked.load(std::memory_order_acquire)) return true;
+    if (g_hooked.load(std::memory_order_acquire)) {
+        OutputDebugStringA("[hooks] Present hook already installed\n");
+        return true;
+    }
 
+    OutputDebugStringA("[hooks] Attempting to install Present hook...\n");
+    
     void* target = resolve_present_target();
     if (!target) {
         OutputDebugStringA("[hooks] Failed to resolve IDXGISwapChain::Present target\n");
         return false;
     }
 
+    OutputDebugStringA("[hooks] Present target resolved successfully\n");
+
     MH_STATUS init_status = MH_Initialize();
     if (init_status != MH_OK && init_status != MH_ERROR_ALREADY_INITIALIZED) {
-        OutputDebugStringA("[hooks] MH_Initialize failed\n");
+        char buf[128];
+        sprintf(buf, "[hooks] MH_Initialize failed with status: %d\n", init_status);
+        OutputDebugStringA(buf);
         return false;
     }
+
+    OutputDebugStringA("[hooks] MinHook initialized\n");
+
     if (MH_CreateHook(target, &hk_present, reinterpret_cast<void**>(&g_orig_present)) != MH_OK) {
         OutputDebugStringA("[hooks] MH_CreateHook failed\n");
         return false;
     }
+
+    OutputDebugStringA("[hooks] Hook created\n");
+
     if (MH_EnableHook(target) != MH_OK) {
         OutputDebugStringA("[hooks] MH_EnableHook failed\n");
         MH_RemoveHook(target);
@@ -130,7 +159,7 @@ bool init_present_hook() {
     }
 
     g_hooked.store(true, std::memory_order_release);
-    OutputDebugStringA("[hooks] Present hook installed\n");
+    OutputDebugStringA("[hooks] Present hook installed successfully!\n");
     return true;
 #else
     OutputDebugStringA("[hooks] MinHook not available; present hook not installed\n");

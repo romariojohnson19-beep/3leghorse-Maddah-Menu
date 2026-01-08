@@ -96,17 +96,29 @@ void draw_overlay() {
 
     OutputDebugStringA("[renderer] Drawing overlay\n");
 
-    ImGui::SetNextWindowBgAlpha(0.35f);
+    // Make overlay more visible - position it prominently
+    ImGui::SetNextWindowPos(ImVec2(50, 50), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(400, 200), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.9f); // More opaque
+    
     ImGui::Begin("3leghorse Overlay", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings |
         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
     
-    // Test message - make it very visible
+    // Test message - make it very visible and large
+    ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[0]); // Default font
+    ImGui::SetWindowFontScale(1.5f); // Make text larger
+    
     ImGui::TextColored(ImVec4(1,0,0,1), "=== 3LEGHORSE MENU LOADED ===");
     ImGui::TextColored(ImVec4(0,1,0,1), "Press F11 to toggle visibility");
+    ImGui::TextColored(ImVec4(1,1,1,1), "If you can see this, ImGui is working!");
     ImGui::Separator();
     ImGui::Text("3leghorse Menu v1.0");
     ImGui::TextColored(ImVec4(1,1,0,1), "Blocked Events: %u", protections::blocked_count());
+    
+    ImGui::SetWindowFontScale(1.0f); // Reset scale
+    ImGui::PopFont();
+    
     ImGui::End();
 
     // Toast stack

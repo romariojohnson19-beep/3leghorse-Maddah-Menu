@@ -5,7 +5,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID /*lpRese
     switch (ul_reason_for_call) {
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(hModule);
-        MessageBoxA(NULL, "3leghorse DLL Loaded Successfully!", "DLL Injection Test", MB_OK | MB_ICONINFORMATION);
+        
+        // Test basic Windows functionality
+        MessageBoxA(NULL, "3leghorse DLL Loaded Successfully!\n\nIf you see this, DLL injection worked.\n\nNow check GTA V for the red menu text.", "DLL Test", MB_OK | MB_ICONINFORMATION);
+        
         OutputDebugStringA("[3leghorse] DLL_PROCESS_ATTACH - Starting initialization\n");
         menu_stub::init();
         OutputDebugStringA("[3leghorse] DLL_PROCESS_ATTACH - Initialization complete\n");
