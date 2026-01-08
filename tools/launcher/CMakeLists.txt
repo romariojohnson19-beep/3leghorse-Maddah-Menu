@@ -14,6 +14,7 @@ target_compile_definitions(menu_launcher PRIVATE
 target_link_libraries(menu_launcher PRIVATE
     kernel32
     user32
+    shell32
 )
 
 install(TARGETS menu_launcher RUNTIME DESTINATION .)

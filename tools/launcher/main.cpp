@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <chrono>
 #include <thread>
+#include <shellapi.h>
 
 namespace fs = std::filesystem;
 
