@@ -1,262 +1,224 @@
 #include <windows.h>
 #include <tlhelp32.h>
-#include <shellapi.h>
 #include <iostream>
-#include <string>
-#include <cwctype>
-#include <cstdint>
+#include <fstream>
 #include <vector>
+#include <string>
+#include <cstring>
 
-static DWORD FindProcessId(const std::wstring& processName) {
-    PROCESSENTRY32W processInfo;
-    processInfo.dwSize = sizeof(processInfo);
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snapshot == INVALID_HANDLE_VALUE) return 0;
-    Process32FirstW(snapshot, &processInfo);
-    if (!processName.empty()) {
-        do {
-            if (!processName.compare(processInfo.szExeFile)) {
-                CloseHandle(snapshot);
-                return processInfo.th32ProcessID;
-            }
-        } while (Process32NextW(snapshot, &processInfo));
+// Enable SeDebugPrivilege for better handle access
+bool EnableSeDebug() {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) {
+        return false;
     }
-    CloseHandle(snapshot);
-    return 0;
+    TOKEN_PRIVILEGES tp{};
+    tp.PrivilegeCount = 1;
+    if (!LookupPrivilegeValue(nullptr, SE_DEBUG_NAME, &tp.Privileges[0].Luid)) {
+        CloseHandle(token);
+        return false;
+    }
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    AdjustTokenPrivileges(token, FALSE, &tp, 0, nullptr, nullptr);
+    bool ok = (GetLastError() == ERROR_SUCCESS);
+    CloseHandle(token);
+    return ok;
 }
 
-int wmain(int argc, wchar_t* argv[]) {
+// Get PID by process name (wide)
+DWORD GetPID(const std::wstring& name) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    DWORD pid = 0;
+    if (Process32FirstW(snap, &entry)) {
+        do {
+            if (_wcsicmp(name.c_str(), entry.szExeFile) == 0) {
+                pid = entry.th32ProcessID;
+                break;
+            }
+        } while (Process32NextW(snap, &entry));
+    }
+    CloseHandle(snap);
+    return pid;
+}
+
+// Minimal x64 manual mapper
+bool ManualMap(HANDLE proc, const std::vector<BYTE>& dllData) {
+    if (dllData.size() < sizeof(IMAGE_DOS_HEADER)) return false;
+    auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(dllData.data());
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(dllData.data() + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+
+    SIZE_T imageSize = nt->OptionalHeader.SizeOfImage;
+    LPVOID remoteBase = VirtualAllocEx(proc, nullptr, imageSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!remoteBase) return false;
+
+    // Copy headers
+    if (!WriteProcessMemory(proc, remoteBase, dllData.data(), nt->OptionalHeader.SizeOfHeaders, nullptr)) {
+        VirtualFreeEx(proc, remoteBase, 0, MEM_RELEASE);
+        return false;
+    }
+
+    // Copy sections
+    auto* section = IMAGE_FIRST_SECTION(nt);
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        LPCVOID src = dllData.data() + section[i].PointerToRawData;
+        LPVOID dst = static_cast<BYTE*>(remoteBase) + section[i].VirtualAddress;
+        SIZE_T size = section[i].SizeOfRawData;
+        if (size && !WriteProcessMemory(proc, dst, src, size, nullptr)) {
+            VirtualFreeEx(proc, remoteBase, 0, MEM_RELEASE);
+            return false;
+        }
+    }
+
+    // Relocations
+    ULONGLONG delta = reinterpret_cast<ULONGLONG>(remoteBase) - nt->OptionalHeader.ImageBase;
+    if (delta && nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size) {
+        auto* reloc = reinterpret_cast<IMAGE_BASE_RELOCATION*>(static_cast<BYTE*>(remoteBase) +
+            nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress);
+        const auto relocEnd = reinterpret_cast<BYTE*>(reloc) + nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size;
+        while (reloc->VirtualAddress && reinterpret_cast<BYTE*>(reloc) < relocEnd) {
+            auto* entry = reinterpret_cast<WORD*>(reloc + 1);
+            int count = (reloc->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+            for (int j = 0; j < count; ++j) {
+                WORD type = entry[j] >> 12;
+                WORD offset = entry[j] & 0x0FFF;
+                if (type == IMAGE_REL_BASED_DIR64) {
+                    BYTE* patchAddr = static_cast<BYTE*>(remoteBase) + reloc->VirtualAddress + offset;
+                    ULONGLONG patched = 0;
+                    if (ReadProcessMemory(proc, patchAddr, &patched, sizeof(patched), nullptr)) {
+                        patched += delta;
+                        WriteProcessMemory(proc, patchAddr, &patched, sizeof(patched), nullptr);
+                    }
+                }
+            }
+            reloc = reinterpret_cast<IMAGE_BASE_RELOCATION*>(reinterpret_cast<BYTE*>(reloc) + reloc->SizeOfBlock);
+        }
+    }
+
+    // Imports
+    if (nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size) {
+        auto* importDesc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(static_cast<BYTE*>(remoteBase) +
+            nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
+        while (importDesc->Name) {
+            auto* modName = reinterpret_cast<LPCSTR>(static_cast<BYTE*>(remoteBase) + importDesc->Name);
+            HMODULE mod = LoadLibraryA(modName); // local load for addresses (assumes same base for system DLLs)
+            if (!mod) return false;
+
+            auto* thunk = reinterpret_cast<IMAGE_THUNK_DATA64*>(static_cast<BYTE*>(remoteBase) + importDesc->OriginalFirstThunk);
+            auto* iat   = reinterpret_cast<IMAGE_THUNK_DATA64*>(static_cast<BYTE*>(remoteBase) + importDesc->FirstThunk);
+            while (thunk->u1.AddressOfData) {
+                FARPROC func = nullptr;
+                if (thunk->u1.Ordinal & IMAGE_ORDINAL_FLAG64) {
+                    func = GetProcAddress(mod, reinterpret_cast<LPCSTR>(thunk->u1.Ordinal & 0xFFFF));
+                } else {
+                    auto* importByName = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(static_cast<BYTE*>(remoteBase) + thunk->u1.AddressOfData);
+                    func = GetProcAddress(mod, importByName->Name);
+                }
+                if (!func) return false;
+                WriteProcessMemory(proc, &iat->u1.Function, &func, sizeof(func), nullptr);
+                ++thunk; ++iat;
+            }
+            ++importDesc;
+        }
+    }
+
+    // Call DllMain remotely (DLL_PROCESS_ATTACH)
+    LPTHREAD_START_ROUTINE entryPoint = reinterpret_cast<LPTHREAD_START_ROUTINE>(static_cast<BYTE*>(remoteBase) + nt->OptionalHeader.AddressOfEntryPoint);
+    HANDLE th = CreateRemoteThread(proc, nullptr, 0, entryPoint, remoteBase, 0, nullptr);
+    if (!th) {
+        VirtualFreeEx(proc, remoteBase, 0, MEM_RELEASE);
+        return false;
+    }
+    WaitForSingleObject(th, INFINITE);
+    CloseHandle(th);
+
+    // Erase headers for stealth
+    std::vector<BYTE> zeros(nt->OptionalHeader.SizeOfHeaders, 0);
+    WriteProcessMemory(proc, remoteBase, zeros.data(), zeros.size(), nullptr);
+
+    return true;
+}
+
+int main(int argc, char** argv) {
     if (argc < 3) {
-        std::wcout << L"Usage: dll_injector <pid|name> <full_path_to_dll>\n";
-        std::wcout << L"Examples: dll_injector 1234 C:\\temp\\YimMenuCustom.dll\n";
-        std::wcout << L"          dll_injector GTA5.exe C:\\temp\\YimMenuCustom.dll\n";
+        std::cout << "Usage: dll_injector <dll_path> <process_name>\n";
+        std::cout << "Example: dll_injector C:/temp/YimMenuCustom.dll GTA5.exe\n";
         return 1;
     }
 
-    DWORD pid = 0;
-    std::wstring target = argv[1];
-    bool byName = false;
-    // if numeric, treat as PID
-    if (iswdigit(target[0])) {
-        pid = std::stoul(target);
-    } else {
-        byName = true;
+    std::string dllPath = argv[1];
+    std::wstring procName(argv[2], argv[2] + std::strlen(argv[2]));
+
+    EnableSeDebug();
+
+    std::ifstream file(dllPath, std::ios::binary);
+    if (!file) {
+        std::cout << "Failed to open DLL file\n";
+        return 1;
+    }
+    std::vector<BYTE> dllData((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    if (dllData.empty()) {
+        std::cout << "DLL file empty\n";
+        return 1;
     }
 
-    std::wstring dllPath = argv[2];
-
-    if (byName) {
-        pid = FindProcessId(target);
-        if (pid == 0) {
-            std::wcerr << L"Process not found: " << target << L"\n";
-            return 2;
-        }
+    DWORD pid = GetPID(procName);
+    if (!pid) {
+        std::cout << "Process not found\n";
+        return 1;
     }
 
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-    std::wcerr << L"[injector] OpenProcess returned handle=" << (void*)hProcess << L"\n";
-    if (!hProcess) {
-        DWORD err = GetLastError();
-        std::wcerr << L"[injector] OpenProcess failed, GetLastError=" << err << L"\n";
-        return 3;
+    HANDLE proc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+    if (!proc) {
+        std::cout << "OpenProcess failed\n";
+        return 1;
     }
 
-    size_t size = (dllPath.size() + 1) * sizeof(wchar_t);
-    LPVOID remoteMem = VirtualAllocEx(hProcess, NULL, size, MEM_COMMIT, PAGE_READWRITE);
-    std::wcerr << L"[injector] VirtualAllocEx returned addr=" << remoteMem << L" size=" << size << L"\n";
-    if (!remoteMem) {
-        DWORD err = GetLastError();
-        std::wcerr << L"[injector] VirtualAllocEx failed, GetLastError=" << err << L"\n";
-        CloseHandle(hProcess);
-        return 4;
-    }
-
-    BOOL wpm = WriteProcessMemory(hProcess, remoteMem, dllPath.c_str(), size, NULL);
-    std::wcerr << L"[injector] WriteProcessMemory returned " << (wpm ? L"TRUE" : L"FALSE") << L"\n";
-    if (!wpm) {
-        DWORD err = GetLastError();
-        std::wcerr << L"[injector] WriteProcessMemory failed, GetLastError=" << err << L"\n";
-        VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
-        return 5;
-    }
-
-    // Resolve LoadLibraryW locally and compute corresponding address in remote process
-    HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
-    std::wcerr << L"[injector] local kernel32 base = " << (void*)hKernel32 << L"\n";
-    FARPROC loadLibLocal = GetProcAddress(hKernel32, "LoadLibraryW");
-    std::wcerr << L"[injector] local LoadLibraryW = " << (void*)loadLibLocal << L"\n";
-    if (!loadLibLocal) {
-        DWORD err = GetLastError();
-        std::wcerr << L"[injector] GetProcAddress(LoadLibraryW) failed, GetLastError=" << err << L"\n";
-        VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
-        return 6;
-    }
-
-    // Find kernel32 base in remote process
-    uintptr_t remoteKernel32Base = 0;
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
-    if (snap != INVALID_HANDLE_VALUE) {
-        MODULEENTRY32W me;
-        me.dwSize = sizeof(me);
-        if (Module32FirstW(snap, &me)) {
-            do {
-                // Compare module name case-insensitively
-                if (_wcsicmp(me.szModule, L"kernel32.dll") == 0) {
-                    remoteKernel32Base = (uintptr_t)me.modBaseAddr;
-                    break;
-                }
-            } while (Module32NextW(snap, &me));
-        }
-        CloseHandle(snap);
-    }
-    std::wcerr << L"[injector] remote kernel32 base = " << (void*)remoteKernel32Base << L"\n";
-
-    uintptr_t localKernel32Base = (uintptr_t)hKernel32;
-    uintptr_t offset = (uintptr_t)loadLibLocal - localKernel32Base;
-    uintptr_t remoteLoadLib = remoteKernel32Base ? (remoteKernel32Base + offset) : 0;
-    std::wcerr << L"[injector] computed remote LoadLibraryW = " << (void*)remoteLoadLib << L" (offset=0x" << std::hex << offset << std::dec << L")\n";
-
-    // Shellcode-based LoadLibraryW stub (to avoid CFG/parameter issues)
-    auto inject_via_shellcode = [&](uintptr_t loadlib_addr) -> bool {
-        if (!loadlib_addr) return false;
-        const size_t code_size = 10 + 10 + 3 + 2 + 3 + 1; // 29 bytes
-        size_t path_bytes = (dllPath.size() + 1) * sizeof(wchar_t);
-        size_t total_size = code_size + path_bytes;
-        LPVOID remote_code = VirtualAllocEx(hProcess, NULL, total_size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-        if (!remote_code) {
-            std::wcerr << L"[injector] shellcode alloc failed, GLE=" << GetLastError() << L"\n";
-            return false;
-        }
-        uintptr_t remote_base = (uintptr_t)remote_code;
-        uintptr_t remote_path_addr = remote_base + code_size;
-
-        std::vector<uint8_t> code;
-        code.reserve(code_size);
-        auto emit64 = [&](uint64_t v) {
-            for (int i = 0; i < 8; ++i) code.push_back(static_cast<uint8_t>((v >> (i * 8)) & 0xFF));
-        };
-
-        // mov rcx, remote_path_addr
-        code.push_back(0x48); code.push_back(0xB9); emit64(remote_path_addr);
-        // mov rax, loadlib_addr
-        code.push_back(0x48); code.push_back(0xB8); emit64(loadlib_addr);
-        // sub rsp, 0x28
-        code.push_back(0x48); code.push_back(0x83); code.push_back(0xEC); code.push_back(0x28);
-        // call rax
-        code.push_back(0xFF); code.push_back(0xD0);
-        // add rsp, 0x28
-        code.push_back(0x48); code.push_back(0x83); code.push_back(0xC4); code.push_back(0x28);
-        // ret
-        code.push_back(0xC3);
-
-        BOOL w1 = WriteProcessMemory(hProcess, remote_code, code.data(), code.size(), NULL);
-        BOOL w2 = WriteProcessMemory(hProcess, (LPVOID)remote_path_addr, dllPath.c_str(), path_bytes, NULL);
-        std::wcerr << L"[injector] shellcode write code=" << (w1 ? L"ok" : L"fail") << L" path=" << (w2 ? L"ok" : L"fail") << L"\n";
-        if (!w1 || !w2) {
-            std::wcerr << L"[injector] shellcode write failed, GLE=" << GetLastError() << L"\n";
-            VirtualFreeEx(hProcess, remote_code, 0, MEM_RELEASE);
-            return false;
-        }
-
-        HANDLE ht = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remote_base, NULL, 0, NULL);
-        std::wcerr << L"[injector] shellcode CRT returned=" << (void*)ht << L" GLE=" << GetLastError() << L"\n";
-        if (!ht) {
-            VirtualFreeEx(hProcess, remote_code, 0, MEM_RELEASE);
-            return false;
-        }
-        WaitForSingleObject(ht, INFINITE);
-        DWORD ec = 0; GetExitCodeThread(ht, &ec);
-        std::wcerr << L"[injector] shellcode thread exit code=" << ec << L"\n";
-        CloseHandle(ht);
-        VirtualFreeEx(hProcess, remote_code, 0, MEM_RELEASE);
-        return ec != 0;
-    };
-
-    // Try CreateRemoteThread with the remote function pointer
-    HANDLE hThread = NULL;
-    if (remoteLoadLib) {
-        hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remoteLoadLib, remoteMem, 0, NULL);
-        std::wcerr << L"[injector] CreateRemoteThread (remote addr) returned hThread=" << (void*)hThread << L"\n";
-        if (!hThread) {
-            DWORD err = GetLastError();
-            std::wcerr << L"[injector] CreateRemoteThread (remote) failed, GetLastError=" << err << L"\n";
-        }
-    } else {
-        std::wcerr << L"[injector] remoteLoadLib not computed; skipping CreateRemoteThread(remote)\n";
-    }
-
-    // If CreateRemoteThread failed (or we couldn't compute remote addr), try NtCreateThreadEx as a fallback
-    if (!hThread) {
-        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-        if (!ntdll) ntdll = LoadLibraryW(L"ntdll.dll");
-        if (ntdll) {
-            typedef LONG (NTAPI *PFN_NtCreateThreadEx)(PHANDLE, ACCESS_MASK, LPVOID, HANDLE, LPTHREAD_START_ROUTINE, LPVOID, ULONG, SIZE_T, SIZE_T, SIZE_T, LPVOID);
-            PFN_NtCreateThreadEx NtCreateThreadEx = (PFN_NtCreateThreadEx)GetProcAddress(ntdll, "NtCreateThreadEx");
-            if (NtCreateThreadEx) {
-                HANDLE hRemoteThread = NULL;
-                LONG status = NtCreateThreadEx(&hRemoteThread, 0x1FFFFF, NULL, hProcess, (LPTHREAD_START_ROUTINE)remoteLoadLib, remoteMem, FALSE, 0, 0, 0, NULL);
-                std::wcerr << L"[injector] NtCreateThreadEx status=0x" << std::hex << status << std::dec << L" hThread=" << (void*)hRemoteThread << L"\n";
-                if (status >= 0 && hRemoteThread) {
-                    hThread = hRemoteThread;
-                }
-            } else {
-                std::wcerr << L"[injector] NtCreateThreadEx not available\n";
-            }
-        } else {
-            std::wcerr << L"[injector] failed to load ntdll.dll\n";
-        }
-    }
-
-    // If thread creation is still blocked, try shellcode
-    if (!hThread) {
-        std::wcerr << L"[injector] trying shellcode-based LoadLibraryW stub\n";
-        bool ok = inject_via_shellcode(remoteLoadLib);
-        if (ok) {
-            CloseHandle(hProcess);
+    // Try LoadLibrary first
+    SIZE_T pathSize = dllPath.size() + 1;
+    LPVOID alloc = VirtualAllocEx(proc, nullptr, pathSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (alloc && WriteProcessMemory(proc, alloc, dllPath.c_str(), pathSize, nullptr)) {
+        HANDLE thread = CreateRemoteThread(proc, nullptr, 0, (LPTHREAD_START_ROUTINE)LoadLibraryA, alloc, 0, nullptr);
+        if (thread) {
+            WaitForSingleObject(thread, INFINITE);
+            CloseHandle(thread);
+            std::cout << "Injected via LoadLibrary\n";
+            VirtualFreeEx(proc, alloc, 0, MEM_RELEASE);
+            CloseHandle(proc);
             return 0;
         }
     }
+    std::cout << "LoadLibrary path failed, trying manual map...\n";
 
-    if (!hThread) {
-        std::wcerr << L"[injector] All remote thread creation attempts failed\n";
-        VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
-        return 7;
+    if (alloc) VirtualFreeEx(proc, alloc, 0, MEM_RELEASE);
+
+    if (ManualMap(proc, dllData)) {
+        std::cout << "Manual map success!\n";
+    } else {
+        std::cout << "Manual map failed\n";
+        CloseHandle(proc);
+        return 1;
     }
 
-    WaitForSingleObject(hThread, INFINITE);
-    DWORD exitCode = 0;
-    GetExitCodeThread(hThread, &exitCode);
-
-    std::wcout << L"Injection thread exit code: " << exitCode << L"\n";
-
-    CloseHandle(hThread);
-    VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
-    CloseHandle(hProcess);
-
+    CloseHandle(proc);
     return 0;
 }
 
-// Some toolchains (MinGW) may try to link against WinMain; provide a thin
-// WinMain wrapper that converts the command-line to wide argv and forwards
-// to wmain so the program works regardless of the subsystem/linker expectations.
-#if defined(_WIN32) && !defined(__MINGW32__)
-// For non-MinGW toolchains, nothing special is required — wmain is fine.
-#endif
-
+// Some MinGW builds may default to a wide GUI entrypoint (wWinMain). Provide
+// a shim that forwards to the existing narrow main so linkage succeeds
+// regardless of the chosen subsystem/entry convention.
 #if defined(_WIN32)
-extern "C" int wmain(int argc, wchar_t* argv[]);
+extern "C" int main(int argc, char** argv);
 
-int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
-    int argc = 0;
-    wchar_t** argvw = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (!argvw) {
-        return wmain(0, nullptr);
-    }
-    int ret = wmain(argc, argvw);
-    LocalFree(argvw);
-    return ret;
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+    return main(__argc, __argv);
+}
+
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmdLine, int nCmdShow) {
+    return wWinMain(hInst, hPrev, nullptr, nCmdShow);
 }
 #endif
