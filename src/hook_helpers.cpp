@@ -29,10 +29,7 @@ bool on_present(IDXGISwapChain* swap_chain) {
             if (!initialized) {
                 initialized = renderer::imgui_init(desc.OutputWindow, device, context);
             }
-            if (menu_stub::overlay_visible()) {
-                renderer::draw_overlay();
-            }
-            ok = true;
+            ok = renderer::on_present();
         }
     }
 
