@@ -60,6 +60,22 @@ bool ReadDLL(const std::string& path, std::vector<BYTE>& out) {
     return true;
 }
 
+// Get alternative process names for known executables
+std::vector<std::string> GetAlternativeProcessNames(const std::string& exeName) {
+    std::vector<std::string> alternatives;
+    
+    // GTA V: PlayGTAV.exe -> GTA5.exe
+    if (exeName == "PlayGTAV.exe" || exeName == "PlayGTAV") {
+        alternatives.push_back("GTA5.exe");
+        alternatives.push_back("GTA5");
+    }
+    
+    // Add more mappings here as needed
+    // Example: if (exeName == "SomeGame.exe") alternatives.push_back("SomeGameProcess.exe");
+    
+    return alternatives;
+}
+
 int main(int argc, char* argv[]) {
     SetConsoleTitleA("3leghorse Launcher");
 
@@ -91,31 +107,74 @@ int main(int argc, char* argv[]) {
 
     DWORD pid = 0;
     fs::path targetPath = targetArg;
+    std::string processName = targetArg;
 
-    // If target is a full exe path and it exists, launch it
+    // Extract filename if full path provided
     if (fs::exists(targetPath) && targetPath.extension() == ".exe") {
-        std::cout << "[+] Starting executable: " << targetArg << "\n";
-        ShellExecuteA(nullptr, "open", targetArg.c_str(), nullptr, nullptr, SW_SHOW);
-        std::this_thread::sleep_for(std::chrono::seconds(10)); // Wait for load
+        processName = targetPath.filename().string();
     }
 
-    // Find PID
-    std::wstring wTarget = Utf8ToWide(targetArg);
-    pid = GetPID(wTarget);
-
-    if (pid == 0) {
-        // Try without .exe extension
-        std::string nameNoExt = targetArg;
-        if (nameNoExt.size() >= 4 && nameNoExt.substr(nameNoExt.size() - 4) == ".exe")
-            nameNoExt.erase(nameNoExt.size() - 4);
-        pid = GetPID(Utf8ToWide(nameNoExt));
+    // First, try to find if the process is already running
+    std::vector<std::string> processNamesToTry = { processName };
+    
+    // Add alternative process names
+    auto alternatives = GetAlternativeProcessNames(processName);
+    processNamesToTry.insert(processNamesToTry.end(), alternatives.begin(), alternatives.end());
+    
+    // Also try without .exe extension for all names
+    std::vector<std::string> namesWithoutExt;
+    for (const auto& name : processNamesToTry) {
+        if (name.size() >= 4 && name.substr(name.size() - 4) == ".exe") {
+            namesWithoutExt.push_back(name.substr(0, name.size() - 4));
+        }
+    }
+    processNamesToTry.insert(processNamesToTry.end(), namesWithoutExt.begin(), namesWithoutExt.end());
+    
+    // Remove duplicates
+    std::sort(processNamesToTry.begin(), processNamesToTry.end());
+    processNamesToTry.erase(std::unique(processNamesToTry.begin(), processNamesToTry.end()), processNamesToTry.end());
+    
+    for (const auto& name : processNamesToTry) {
+        std::cout << "[+] Trying process name: " << name << "\n";
+        std::wstring wTarget = Utf8ToWide(name);
+        pid = GetPID(wTarget);
+        if (pid != 0) {
+            std::cout << "[+] Found process: " << name << " (PID: " << pid << ")\n";
+            processName = name; // Update processName to the found name
+            break;
+        }
     }
 
     if (pid == 0) {
-        std::cout << "[!] Could not find running process: " << targetArg << "\n";
-        std::cout << "Press Enter to exit...\n";
-        std::cin.get();
-        return 1;
+        std::cout << "[!] Could not find running process: " << processName << "\n";
+
+        // If it's a full exe path, try launching it
+        if (fs::exists(targetPath) && targetPath.extension() == ".exe") {
+            std::cout << "[+] Starting executable: " << targetArg << "\n";
+            ShellExecuteA(nullptr, "open", targetArg.c_str(), nullptr, nullptr, SW_SHOW);
+            std::this_thread::sleep_for(std::chrono::seconds(10)); // Wait for load
+            
+            std::cout << "[+] Searching again after launch...\n";
+            
+            // Try all process names again after launching
+            for (const auto& name : processNamesToTry) {
+                std::cout << "[+] Trying process name: " << name << "\n";
+                std::wstring wTarget = Utf8ToWide(name);
+                pid = GetPID(wTarget);
+                if (pid != 0) {
+                    std::cout << "[+] Found process after launch: " << name << " (PID: " << pid << ")\n";
+                    processName = name; // Update processName to the found name
+                    break;
+                }
+            }
+        }
+
+        if (pid == 0) {
+            std::cout << "[!] Still could not find process after launch attempt\n";
+            std::cout << "Press Enter to exit...\n";
+            std::cin.get();
+            return 1;
+        }
     }
 
     std::cout << "[+] Found target PID: " << pid << "\n";
