@@ -5,6 +5,9 @@
 #include <vector>
 #include <fstream>
 #include <iostream>
+#include <filesystem>
+#include <locale>
+#include <codecvt>
 
 // Keep console open and allow time to read errors when closing
 BOOL WINAPI ConsoleCtrlHandler(DWORD ctrl) {
@@ -52,6 +55,21 @@ DWORD GetPID(const std::wstring& name) {
     return pid;
 }
 
+static bool IsDigits(const std::string &s) {
+    for (char c : s) if (!isdigit(static_cast<unsigned char>(c))) return false;
+    return !s.empty();
+}
+
+static std::wstring Utf8ToWide(const std::string &utf8) {
+    if (utf8.empty()) return {};
+    int size_needed = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), (int)utf8.size(), nullptr, 0);
+    if (size_needed <= 0) return {};
+    std::wstring w;
+    w.resize(size_needed);
+    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), (int)utf8.size(), &w[0], size_needed);
+    return w;
+}
+
 int main(int argc, char* argv[]) {
     SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
     SetConsoleTitleA("3leghorse Launcher");
@@ -66,14 +84,21 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::string dllPathUtf8 = argv[1];
-    std::string procNameUtf8 = argv[2];
-    std::wstring procName(procNameUtf8.begin(), procNameUtf8.end());
 
-    // Basic file existence check
-    std::ifstream dllFile(dllPathUtf8, std::ios::binary);
-    if (!dllFile) {
-        printf("[!] DLL not found: %s\n", dllPathUtf8.c_str());
+    std::string dllPathUtf8 = argv[1];
+    std::string targetArg = argv[2];
+
+    // Resolve DLL path using filesystem (handles relative paths)
+    std::error_code ec;
+    std::filesystem::path dllPath = std::filesystem::u8path(dllPathUtf8);
+    if (!dllPath.is_absolute()) dllPath = std::filesystem::absolute(dllPath, ec);
+    if (ec) {
+        printf("[!] Failed to resolve DLL path: %s (err %d)\n", dllPathUtf8.c_str(), ec.value());
+        system("pause");
+        return 1;
+    }
+    if (!std::filesystem::exists(dllPath)) {
+        printf("[!] DLL not found: %s\n", dllPath.u8string().c_str());
         system("pause");
         return 1;
     }
@@ -82,11 +107,44 @@ int main(int argc, char* argv[]) {
         printf("[!] EnableSeDebug failed (continuing). LastError: %lu\n", GetLastError());
     }
 
-    DWORD pid = GetPID(procName);
+    DWORD pid = 0;
+    std::wstring procNameW;
+    if (IsDigits(targetArg)) {
+        // Treat as PID
+        pid = static_cast<DWORD>(std::stoul(targetArg));
+    } else {
+        procNameW = Utf8ToWide(targetArg);
+        pid = GetPID(procNameW);
+    }
     if (!pid) {
-        printf("[!] Process '%s' not found.\n", procNameUtf8.c_str());
-        system("pause");
-        return 1;
+        // If targetArg looks like an executable path, try to start it
+        std::filesystem::path possibleExe = std::filesystem::u8path(targetArg);
+        if (!possibleExe.is_absolute()) possibleExe = std::filesystem::absolute(possibleExe, ec);
+        if (!ec && std::filesystem::exists(possibleExe) && possibleExe.has_extension()) {
+            // Attempt to create the process
+            printf("[ ] Target not running; attempting to start: %s\n", possibleExe.u8string().c_str());
+            STARTUPINFOW si{};
+            PROCESS_INFORMATION pi{};
+            si.cb = sizeof(si);
+            std::wstring cmdline = Utf8ToWide(possibleExe.u8string());
+            // CreateProcess requires modifiable buffer
+            std::vector<wchar_t> cmdBuf(cmdline.begin(), cmdline.end());
+            cmdBuf.push_back(0);
+            if (CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE, CREATE_NEW_CONSOLE, nullptr, nullptr, &si, &pi)) {
+                printf("[+] Launched process, PID=%lu\n", pi.dwProcessId);
+                pid = pi.dwProcessId;
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+            } else {
+                printf("[!] Failed to start target. LastError: %lu\n", GetLastError());
+                system("pause");
+                return 1;
+            }
+        } else {
+            printf("[!] Target process not found (or PID invalid): %s\n", targetArg.c_str());
+            system("pause");
+            return 1;
+        }
     }
     printf("[+] Target PID: %lu\n", pid);
 
@@ -98,7 +156,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Write DLL path (wide) into target process and call LoadLibraryW
-    std::wstring dllPathW(dllPathUtf8.begin(), dllPathUtf8.end());
+    std::wstring dllPathW = Utf8ToWide(dllPath.u8string());
     SIZE_T bytes = (dllPathW.size() + 1) * sizeof(wchar_t);
     LPVOID remoteMem = VirtualAllocEx(proc, nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!remoteMem) {
