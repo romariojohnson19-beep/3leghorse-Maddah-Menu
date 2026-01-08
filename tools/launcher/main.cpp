@@ -1,200 +1,169 @@
 #include <windows.h>
 #include <tlhelp32.h>
-#include <string>
-#include <cstdio>
-#include <vector>
-#include <fstream>
 #include <iostream>
+#include <fstream>
+#include <vector>
+#include <string>
 #include <filesystem>
-#include <locale>
-#include <codecvt>
+#include <chrono>
+#include <thread>
 
-// Keep console open and allow time to read errors when closing
-BOOL WINAPI ConsoleCtrlHandler(DWORD ctrl) {
-    if (ctrl == CTRL_CLOSE_EVENT) {
-        printf("[!] Exit requested - holding for debug...\n");
-        Sleep(5000); // 5 seconds to copy output
-    }
-    return TRUE;
+namespace fs = std::filesystem;
+
+// Helper: Convert UTF-8 std::string to wide string
+static std::wstring Utf8ToWide(const std::string& utf8) {
+    if (utf8.empty()) return {};
+    int size = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), (int)utf8.size(), nullptr, 0);
+    std::wstring wide(size, 0);
+    MultiByteToWideChar(CP_UTF8, 0, utf8.data(), (int)utf8.size(), wide.data(), size);
+    return wide;
 }
 
 bool EnableSeDebug() {
-    HANDLE token = nullptr;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token))
+    HANDLE token;
+    TOKEN_PRIVILEGES tp;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &token))
         return false;
-    TOKEN_PRIVILEGES tp{};
+    LookupPrivilegeValue(nullptr, SE_DEBUG_NAME, &tp.Privileges[0].Luid);
     tp.PrivilegeCount = 1;
-    if (!LookupPrivilegeValue(nullptr, SE_DEBUG_NAME, &tp.Privileges[0].Luid)) {
-        CloseHandle(token);
-        return false;
-    }
     tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
     AdjustTokenPrivileges(token, FALSE, &tp, 0, nullptr, nullptr);
-    bool ok = (GetLastError() == ERROR_SUCCESS);
     CloseHandle(token);
-    return ok;
+    return true;
 }
 
 DWORD GetPID(const std::wstring& name) {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE)
-        return 0;
+    if (snap == INVALID_HANDLE_VALUE) return 0;
 
-    PROCESSENTRY32W entry{};
-    entry.dwSize = sizeof(entry);
-    DWORD pid = 0;
+    PROCESSENTRY32W entry = { sizeof(entry) };
     if (Process32FirstW(snap, &entry)) {
         do {
-            if (_wcsicmp(name.c_str(), entry.szExeFile) == 0) {
-                pid = entry.th32ProcessID;
-                break;
+            if (name == entry.szExeFile) {
+                CloseHandle(snap);
+                return entry.th32ProcessID;
             }
         } while (Process32NextW(snap, &entry));
     }
     CloseHandle(snap);
-    return pid;
+    return 0;
 }
 
-static bool IsDigits(const std::string &s) {
-    for (char c : s) if (!isdigit(static_cast<unsigned char>(c))) return false;
-    return !s.empty();
+// Very basic manual map (only for demonstration - not production ready)
+bool ManualMap(HANDLE proc, const std::vector<BYTE>& data) {
+    std::cout << "[!] Manual map not implemented in this version.\n";
+    std::cout << "[!] Using fallback LoadLibrary injection.\n";
+    return false;
 }
 
-static std::wstring Utf8ToWide(const std::string &utf8) {
-    if (utf8.empty()) return {};
-    int size_needed = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), (int)utf8.size(), nullptr, 0);
-    if (size_needed <= 0) return {};
-    std::wstring w;
-    w.resize(size_needed);
-    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), (int)utf8.size(), &w[0], size_needed);
-    return w;
+static bool ReadDLL(const std::string& path, std::vector<BYTE>& out) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    f.seekg(0, std::ios::end);
+    std::streamsize n = f.tellg();
+    f.seekg(0, std::ios::beg);
+    out.resize(static_cast<size_t>(n));
+    if (n > 0) f.read(reinterpret_cast<char*>(out.data()), n);
+    return true;
 }
 
 int main(int argc, char* argv[]) {
-    SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
     SetConsoleTitleA("3leghorse Launcher");
-    freopen("CONOUT$", "w", stdout);
-    freopen("CONOUT$", "w", stderr);
-    printf("[+] 3leghorse Launcher Debug Mode Enabled\n");
 
-    if (argc < 3) {
-        printf("[!] Usage: menu_launcher.exe <full_path_to_dll> <process_name>\n");
-        printf("[?] Example: menu_launcher.exe C:\\path\\YimMenuCustom.dll GTA5.exe\n");
-        system("pause");
+    if (argc < 2) {
+        std::cout << "Usage: launcher.exe <dll_path> [process_name or exe_path]\n";
+        std::cout << "Example: launcher.exe 3leghorse.dll GTA5.exe\n";
+        std::cout << "Press Enter to exit...\n";
+        std::cin.get();
         return 1;
     }
 
+    std::string dllPath = argv[1];
 
-    std::string dllPathUtf8 = argv[1];
-    std::string targetArg = argv[2];
+    std::string targetArg = (argc >= 3) ? argv[2] : "GTA5.exe";
 
-    // Resolve DLL path using filesystem (handles relative paths)
-    std::error_code ec;
-    std::filesystem::path dllPath = std::filesystem::u8path(dllPathUtf8);
-    if (!dllPath.is_absolute()) dllPath = std::filesystem::absolute(dllPath, ec);
-    if (ec) {
-        printf("[!] Failed to resolve DLL path: %s (err %d)\n", dllPathUtf8.c_str(), ec.value());
-        system("pause");
-        return 1;
-    }
-    if (!std::filesystem::exists(dllPath)) {
-        printf("[!] DLL not found: %s\n", dllPath.u8string().c_str());
-        system("pause");
-        return 1;
-    }
+    EnableSeDebug();
 
-    if (!EnableSeDebug()) {
-        printf("[!] EnableSeDebug failed (continuing). LastError: %lu\n", GetLastError());
-    }
+    std::cout << "[+] Looking for target: " << targetArg << "\n";
 
     DWORD pid = 0;
-    std::wstring procNameW;
-    if (IsDigits(targetArg)) {
-        // Treat as PID
-        pid = static_cast<DWORD>(std::stoul(targetArg));
-    } else {
-        procNameW = Utf8ToWide(targetArg);
-        pid = GetPID(procNameW);
+    fs::path targetPath = targetArg;
+
+    if (fs::exists(targetPath) && fs::is_regular_file(targetPath)) {
+        // Try to start executable
+        std::cout << "[+] Starting executable: " << targetArg << "\n";
+        ShellExecuteA(nullptr, "open", targetArg.c_str(), nullptr, nullptr, SW_SHOW);
+        std::this_thread::sleep_for(std::chrono::seconds(8)); // wait a bit
     }
-    if (!pid) {
-        // If targetArg looks like an executable path, try to start it
-        std::filesystem::path possibleExe = std::filesystem::u8path(targetArg);
-        if (!possibleExe.is_absolute()) possibleExe = std::filesystem::absolute(possibleExe, ec);
-        if (!ec && std::filesystem::exists(possibleExe) && possibleExe.has_extension()) {
-            // Attempt to create the process
-            printf("[ ] Target not running; attempting to start: %s\n", possibleExe.u8string().c_str());
-            STARTUPINFOW si{};
-            PROCESS_INFORMATION pi{};
-            si.cb = sizeof(si);
-            std::wstring cmdline = Utf8ToWide(possibleExe.u8string());
-            // CreateProcess requires modifiable buffer
-            std::vector<wchar_t> cmdBuf(cmdline.begin(), cmdline.end());
-            cmdBuf.push_back(0);
-            if (CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE, CREATE_NEW_CONSOLE, nullptr, nullptr, &si, &pi)) {
-                printf("[+] Launched process, PID=%lu\n", pi.dwProcessId);
-                pid = pi.dwProcessId;
-                CloseHandle(pi.hThread);
-                CloseHandle(pi.hProcess);
-            } else {
-                printf("[!] Failed to start target. LastError: %lu\n", GetLastError());
-                system("pause");
-                return 1;
-            }
+
+    // Try to find running process
+    std::wstring wTarget = Utf8ToWide(targetArg);
+    pid = GetPID(wTarget);
+    if (pid == 0 && targetArg.find(".exe") != std::string::npos) {
+        // Try stripping .exe for name
+        std::wstring wName = Utf8ToWide(targetArg.substr(0, targetArg.find_last_of('.')));
+        pid = GetPID(wName);
+    }
+
+    if (pid == 0) {
+        std::cout << "[!] Could not find running process '" << targetArg << "'\n";
+        std::cout << "Press Enter to exit...\n";
+        std::cin.get();
+        return 1;
+    }
+
+    std::cout << "[+] Found target PID: " << pid << "\n";
+
+    HANDLE proc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+    if (!proc) {
+        std::cout << "[!] OpenProcess failed. Error: " << GetLastError() << "\n";
+        std::cout << "Press Enter to exit...\n";
+        std::cin.get();
+        return 1;
+    }
+
+    // Try LoadLibrary first
+    size_t pathSize = dllPath.size() + 1;
+    LPVOID alloc = VirtualAllocEx(proc, nullptr, pathSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!alloc) {
+        std::cout << "[!] VirtualAllocEx failed. Error: " << GetLastError() << "\n";
+        CloseHandle(proc);
+        std::cout << "Press Enter to exit...\n";
+        std::cin.get();
+        return 1;
+    }
+
+    if (!WriteProcessMemory(proc, alloc, dllPath.c_str(), pathSize, nullptr)) {
+        std::cout << "[!] WriteProcessMemory failed. Error: " << GetLastError() << "\n";
+        VirtualFreeEx(proc, alloc, 0, MEM_RELEASE);
+        CloseHandle(proc);
+        std::cout << "Press Enter to exit...\n";
+        std::cin.get();
+        return 1;
+    }
+
+    HANDLE thread = CreateRemoteThread(proc, nullptr, 0, (LPTHREAD_START_ROUTINE)LoadLibraryA, alloc, 0, nullptr);
+    if (thread) {
+        WaitForSingleObject(thread, INFINITE);
+        CloseHandle(thread);
+        std::cout << "[+] Injected successfully via LoadLibrary!\n";
+    } else {
+        std::cout << "[!] CreateRemoteThread failed. Error: " << GetLastError() << "\n";
+        std::cout << "[!] Trying manual map fallback...\n";
+        std::vector<BYTE> dllData;
+        if (!ReadDLL(dllPath, dllData)) {
+            std::cout << "[!] Could not read DLL file\n";
+        } else if (ManualMap(proc, dllData)) {
+            std::cout << "[+] Manual map success!\n";
         } else {
-            printf("[!] Target process not found (or PID invalid): %s\n", targetArg.c_str());
-            system("pause");
-            return 1;
+            std::cout << "[!] Manual map also failed\n";
         }
     }
-    printf("[+] Target PID: %lu\n", pid);
 
-    HANDLE proc = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, FALSE, pid);
-    if (!proc) {
-        printf("[!] OpenProcess failed. LastError: %lu\n", GetLastError());
-        system("pause");
-        return 1;
-    }
-
-    // Write DLL path (wide) into target process and call LoadLibraryW
-    std::wstring dllPathW = Utf8ToWide(dllPath.u8string());
-    SIZE_T bytes = (dllPathW.size() + 1) * sizeof(wchar_t);
-    LPVOID remoteMem = VirtualAllocEx(proc, nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!remoteMem) {
-        printf("[!] VirtualAllocEx failed. LastError: %lu\n", GetLastError());
-        CloseHandle(proc);
-        system("pause");
-        return 1;
-    }
-
-    if (!WriteProcessMemory(proc, remoteMem, dllPathW.c_str(), bytes, nullptr)) {
-        printf("[!] WriteProcessMemory failed. LastError: %lu\n", GetLastError());
-        VirtualFreeEx(proc, remoteMem, 0, MEM_RELEASE);
-        CloseHandle(proc);
-        system("pause");
-        return 1;
-    }
-
-    printf("[ ] Creating remote thread (LoadLibraryW)...\n");
-    HANDLE thread = CreateRemoteThread(proc, nullptr, 0,
-        reinterpret_cast<LPTHREAD_START_ROUTINE>(LoadLibraryW), remoteMem, 0, nullptr);
-    if (!thread) {
-        printf("[!] CreateRemoteThread failed. LastError: %lu\n", GetLastError());
-        VirtualFreeEx(proc, remoteMem, 0, MEM_RELEASE);
-        CloseHandle(proc);
-        system("pause");
-        return 1;
-    }
-
-    WaitForSingleObject(thread, INFINITE);
-    DWORD exitCode = 0;
-    GetExitCodeThread(thread, &exitCode);
-    printf("[+] Remote thread exit code: 0x%08lX\n", exitCode);
-
-    CloseHandle(thread);
-    VirtualFreeEx(proc, remoteMem, 0, MEM_RELEASE);
+    VirtualFreeEx(proc, alloc, 0, MEM_RELEASE);
     CloseHandle(proc);
 
-    printf("[!] Injection complete — press any key to exit.\n");
-    system("pause");
+    std::cout << "\nPress Enter to exit...\n";
+    std::cin.get();
     return 0;
 }
