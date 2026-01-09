@@ -268,8 +268,21 @@ bool BuildDLL() {
         fs::create_directories(buildDir);
     }
 
-    // Run cmake configure
-    std::string cmakeCmd = "cmake -G \"MinGW Makefiles\" -B \"" + buildDir.string() + "\" -S \"" + rootDir.string() + "\"";
+    // Resolve optional MinHook dir: env MINHOOK_DIR or external/MinHook relative to repo
+    std::string minhookArg;
+    if (const char* env = std::getenv("MINHOOK_DIR")) {
+        minhookArg = std::string(" -DMINHOOK_DIR=\"") + env + "\"";
+    } else {
+        fs::path candidate = rootDir / "external" / "MinHook";
+        if (fs::exists(candidate / "include") && fs::exists(candidate / "lib")) {
+            minhookArg = std::string(" -DMINHOOK_DIR=\"") + candidate.string() + "\"";
+            std::cout << "[+] Found MinHook at " << candidate << "\n";
+        }
+    }
+
+    // Run cmake configure with required options for hooks + ImGui
+    std::string cmakeCmd = "cmake -G \"MinGW Makefiles\" -B \"" + buildDir.string() + "\" -S \"" + rootDir.string() +
+        "\" -DENABLE_SCRIPTHOOKV=ON -DENABLE_IMGUI=ON" + minhookArg;
     std::cout << "[+] Running: " << cmakeCmd << "\n";
     if (!RunCommand(cmakeCmd)) {
         std::cout << "[!] CMake configure failed\n";
