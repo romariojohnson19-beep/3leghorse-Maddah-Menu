@@ -222,6 +222,71 @@ std::vector<std::string> GetAlternativeProcessNames(const std::string& exeName) 
     return alternatives;
 }
 
+// Function to run a command and wait
+bool RunCommand(const std::string& cmd, const std::string& cwd = "") {
+    STARTUPINFOA si = { sizeof(si) };
+    PROCESS_INFORMATION pi;
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE; // Hide the console window
+
+    std::string fullCmd = "cmd.exe /c " + cmd;
+    char* cmdLine = _strdup(fullCmd.c_str());
+
+    if (!CreateProcessA(nullptr, cmdLine, nullptr, nullptr, FALSE, 0, nullptr, cwd.empty() ? nullptr : cwd.c_str(), &si, &pi)) {
+        free(cmdLine);
+        return false;
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exitCode;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    free(cmdLine);
+    return exitCode == 0;
+}
+
+// Function to build the DLL
+bool BuildDLL() {
+    std::cout << "[+] DLL not found, attempting to build...\n";
+
+    // Assume launcher is in tools/launcher/build, so root is ..\..\..
+    fs::path launcherDir = fs::current_path();
+    fs::path rootDir = launcherDir.parent_path().parent_path().parent_path();
+
+    fs::path buildDir = rootDir / "build";
+    fs::path cmakeLists = rootDir / "CMakeLists.txt";
+
+    if (!fs::exists(cmakeLists)) {
+        std::cout << "[!] CMakeLists.txt not found in " << rootDir << "\n";
+        return false;
+    }
+
+    // Create build dir if needed
+    if (!fs::exists(buildDir)) {
+        fs::create_directories(buildDir);
+    }
+
+    // Run cmake configure
+    std::string cmakeCmd = "\"C:\\msys64\\mingw64\\bin\\cmake.exe\" -B \"" + buildDir.string() + "\" -S \"" + rootDir.string() + "\"";
+    std::cout << "[+] Running: " << cmakeCmd << "\n";
+    if (!RunCommand(cmakeCmd)) {
+        std::cout << "[!] CMake configure failed\n";
+        return false;
+    }
+
+    // Run cmake build
+    std::string buildCmd = "\"C:\\msys64\\mingw64\\bin\\cmake.exe\" --build \"" + buildDir.string() + "\" --config Release";
+    std::cout << "[+] Running: " << buildCmd << "\n";
+    if (!RunCommand(buildCmd)) {
+        std::cout << "[!] CMake build failed\n";
+        return false;
+    }
+
+    std::cout << "[+] Build completed successfully\n";
+    return true;
+}
+
 int main(int argc, char* argv[]) {
     SetConsoleTitleA("3leghorse Launcher");
 
@@ -241,11 +306,24 @@ int main(int argc, char* argv[]) {
             }
         }
         if (dllPathUtf8.empty()) {
-            std::cout << "Usage: launcher.exe <dll_path> [process_name_or_exe]\n";
-            std::cout << "Example: launcher.exe 3leghorse.dll PlayGTAV.exe\n";
-            std::cout << "Press Enter to exit...\n";
-            std::cin.get();
-            return 1;
+            // Try to build the DLL
+            if (BuildDLL()) {
+                // Check candidates again after build
+                for (const auto& c : candidates) {
+                    if (fs::exists(c)) {
+                        dllPathUtf8 = c.string();
+                        std::cout << "[+] Using built DLL: " << dllPathUtf8 << "\n";
+                        break;
+                    }
+                }
+            }
+            if (dllPathUtf8.empty()) {
+                std::cout << "Usage: launcher.exe <dll_path> [process_name_or_exe]\n";
+                std::cout << "Example: launcher.exe 3leghorse.dll PlayGTAV.exe\n";
+                std::cout << "Press Enter to exit...\n";
+                std::cin.get();
+                return 1;
+            }
         }
     } else {
         dllPathUtf8 = argv[1];
