@@ -269,7 +269,7 @@ bool BuildDLL() {
     }
 
     // Run cmake configure
-    std::string cmakeCmd = "cmake -B \"" + buildDir.string() + "\" -S \"" + rootDir.string() + "\"";
+    std::string cmakeCmd = "cmake -G \"MinGW Makefiles\" -B \"" + buildDir.string() + "\" -S \"" + rootDir.string() + "\"";
     std::cout << "[+] Running: " << cmakeCmd << "\n";
     if (!RunCommand(cmakeCmd)) {
         std::cout << "[!] CMake configure failed\n";
