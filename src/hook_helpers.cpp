@@ -64,7 +64,7 @@ bool on_wndproc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 namespace hook_helpers {
 bool on_present(void*) { return false; }
-bool on_wndproc(void*, unsigned int, unsigned long, long) { return false; }
+bool on_wndproc(HWND, UINT, WPARAM, LPARAM) { return false; }
 } // namespace hook_helpers
 
 #endif
