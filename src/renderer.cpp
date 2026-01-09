@@ -158,7 +158,7 @@ void draw_overlay() {
     ImGui::SetWindowFontScale(1.5f); // Make text larger
     
     ImGui::TextColored(ImVec4(1,0,0,1), "=== 3LEGHORSE MENU LOADED ===");
-    ImGui::TextColored(ImVec4(0,1,0,1), "Press F7 to toggle visibility");
+    ImGui::TextColored(ImVec4(0,1,0,1), "Press F9 to toggle visibility");
     ImGui::TextColored(ImVec4(1,1,1,1), "If you can see this, ImGui is working!");
     ImGui::Separator();
     ImGui::Text("3leghorse Menu v1.0");
