@@ -47,7 +47,7 @@ static std::atomic<IDXGISwapChain*> g_swap_chain{nullptr};
 
 static IDXGISwapChain* resolve_swapchain_from_pattern() {
     const uint8_t pattern[] = { 0x48, 0x8B, 0x05, 0, 0, 0, 0, 0x48, 0x85, 0xC0, 0x74, 0x0F, 0x48, 0x8B, 0x88 };
-    const char mask[]       = "xxx????xxx";
+    const char mask[]       = "xxx????xxxxxxxxx";
 
     MODULEINFO mod{};
     GetModuleInformation(GetCurrentProcess(), GetModuleHandle(nullptr), &mod, sizeof(mod));
