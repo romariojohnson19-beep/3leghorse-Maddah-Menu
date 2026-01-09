@@ -44,6 +44,7 @@ static std::atomic_bool g_min_hook_ready{false};
 static WNDPROC g_orig_wndproc     = nullptr;
 static HWND g_hwnd                = nullptr;
 static std::atomic<IDXGISwapChain*> g_swap_chain{nullptr};
+static std::atomic_bool g_imgui_initialized{false};
 
 static IDXGISwapChain* resolve_swapchain_from_pattern() {
     OutputDebugStringA("[present_hook] scanning for swapchain pattern (MR-X signature)\\n");
@@ -143,7 +144,38 @@ HRESULT __stdcall hk_present(IDXGISwapChain* swap_chain, UINT sync_interval, UIN
         return g_orig_present ? g_orig_present(swap_chain, sync_interval, flags) : S_OK;
     }
 
-    install_wndproc_if_needed(swap_chain);
+    if (swap_chain) {
+        g_swap_chain.store(swap_chain, std::memory_order_release);
+
+        if (!g_imgui_initialized.load(std::memory_order_acquire)) {
+            ID3D11Device* device = nullptr;
+            ID3D11DeviceContext* context = nullptr;
+            DXGI_SWAP_CHAIN_DESC desc{};
+
+            bool inited = false;
+            if (SUCCEEDED(swap_chain->GetDesc(&desc)) &&
+                SUCCEEDED(swap_chain->GetDevice(__uuidof(ID3D11Device), (void**)&device)) && device) {
+                device->GetImmediateContext(&context);
+                if (renderer::imgui_init(desc.OutputWindow, device, context)) {
+                    OutputDebugStringA("[present_hook] imgui_init succeeded\n");
+                    renderer::on_resize_end(swap_chain);
+                    inited = true;
+                } else {
+                    OutputDebugStringA("[present_hook] imgui_init failed\n");
+                }
+            }
+
+            if (context) context->Release();
+            if (device) device->Release();
+
+            if (inited) {
+                g_imgui_initialized.store(true, std::memory_order_release);
+                install_wndproc_if_needed(swap_chain);
+            }
+        } else {
+            install_wndproc_if_needed(swap_chain);
+        }
+    }
 
     // Ensure we install on the exact swapchain instance we see in the first real Present.
     if (!g_hooks_installed.load(std::memory_order_acquire) && swap_chain) {
