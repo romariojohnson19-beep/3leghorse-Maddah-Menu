@@ -60,21 +60,42 @@ void tick_loop() {
         }
         // Hotkey handler: toggle overlay (rendering happens in Present hook)
         int vk = cfg::get().toggle_hotkey;
+        
+        // Check for key press (both GetAsyncKeyState and GetKeyState)
+        bool key_pressed = false;
         if (GetAsyncKeyState(vk) & 1) {
+            key_pressed = true;
+        }
+        
+        // Also check if key is currently down
+        static bool was_down = false;
+        bool is_down = (GetAsyncKeyState(vk) & 0x8000) != 0;
+        if (is_down && !was_down) {
+            key_pressed = true;
+        }
+        was_down = is_down;
+        
+        if (key_pressed) {
             bool new_visibility = !g_overlay_visible.load();
             g_overlay_visible.store(new_visibility);
             char buf[128];
-            sprintf(buf, "[menu_stub] Hotkey pressed! Overlay visibility: %d\n", new_visibility);
+            sprintf(buf, "[menu_stub] HOTKEY PRESSED! F11 (0x%X) detected. Overlay visibility: %d -> %d\n", 
+                   vk, !new_visibility, new_visibility);
             OutputDebugStringA(buf);
+            
+            // Also show a message box for immediate feedback
+            char msg[128];
+            sprintf(msg, "Menu toggled! Visibility: %s", new_visibility ? "ON" : "OFF");
+            MessageBoxA(NULL, msg, "3leghorse Menu", MB_OK | MB_ICONINFORMATION);
         }
 
-        // Debug output every 5 seconds
+        // Debug output every 2 seconds (more frequent)
         static auto last_debug = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::seconds>(now - last_debug).count() >= 5) {
-            char buf[128];
-            sprintf(buf, "[menu_stub] Tick loop running, overlay visible: %d, hotkey: 0x%X\n",
-                   g_overlay_visible.load(), vk);
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - last_debug).count() >= 2) {
+            char buf[256];
+            sprintf(buf, "[menu_stub] Tick loop active - overlay visible: %d, hotkey: 0x%X, key_state: 0x%X\n",
+                   g_overlay_visible.load(), vk, GetAsyncKeyState(vk));
             OutputDebugStringA(buf);
             last_debug = now;
         }

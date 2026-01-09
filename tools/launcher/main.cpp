@@ -60,6 +60,152 @@ bool ReadDLL(const std::string& path, std::vector<BYTE>& out) {
     return true;
 }
 
+// Minimal x64 manual map (no TLS callbacks). Assumes same-arch target.
+bool ManualMap64(HANDLE proc, const std::vector<BYTE>& image, LPVOID& remoteBaseOut) {
+    remoteBaseOut = nullptr;
+    if (image.size() < sizeof(IMAGE_DOS_HEADER)) {
+        std::cout << "[!] ManualMap: image too small\n";
+        return false;
+    }
+
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(image.data());
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+        std::cout << "[!] ManualMap: bad DOS signature\n";
+        return false;
+    }
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(image.data() + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+        std::cout << "[!] ManualMap: unsupported PE (expecting x64)\n";
+        return false;
+    }
+
+    SIZE_T imageSize   = nt->OptionalHeader.SizeOfImage;
+    SIZE_T headersSize = nt->OptionalHeader.SizeOfHeaders;
+
+    LPVOID remoteBase = VirtualAllocEx(proc, reinterpret_cast<LPVOID>(nt->OptionalHeader.ImageBase), imageSize, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    if (!remoteBase) {
+        remoteBase = VirtualAllocEx(proc, nullptr, imageSize, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    }
+    if (!remoteBase) {
+        std::cout << "[!] ManualMap: VirtualAllocEx failed. Error: " << GetLastError() << "\n";
+        return false;
+    }
+
+    if (!WriteProcessMemory(proc, remoteBase, image.data(), headersSize, nullptr)) {
+        std::cout << "[!] ManualMap: failed to write headers. Error: " << GetLastError() << "\n";
+        VirtualFreeEx(proc, remoteBase, 0, MEM_RELEASE);
+        return false;
+    }
+
+    auto* section = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section) {
+        if (section->SizeOfRawData == 0) continue;
+        LPCVOID localAddr = image.data() + section->PointerToRawData;
+        LPVOID remoteAddr = static_cast<BYTE*>(remoteBase) + section->VirtualAddress;
+        SIZE_T size = section->SizeOfRawData;
+        if (!WriteProcessMemory(proc, remoteAddr, localAddr, size, nullptr)) {
+            std::cout << "[!] ManualMap: failed to write section " << section->Name << " Error: " << GetLastError() << "\n";
+            VirtualFreeEx(proc, remoteBase, 0, MEM_RELEASE);
+            return false;
+        }
+    }
+
+    ULONGLONG delta = reinterpret_cast<ULONGLONG>(remoteBase) - nt->OptionalHeader.ImageBase;
+
+    if (delta != 0) {
+        const auto& relocDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+        if (relocDir.Size) {
+            SIZE_T offset = 0;
+            while (offset < relocDir.Size) {
+                auto* block = reinterpret_cast<const IMAGE_BASE_RELOCATION*>(image.data() + relocDir.VirtualAddress + offset);
+                if (block->SizeOfBlock == 0) break;
+                size_t entryCount = (block->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+                auto* entry = reinterpret_cast<const WORD*>(reinterpret_cast<const BYTE*>(block) + sizeof(IMAGE_BASE_RELOCATION));
+                for (size_t i = 0; i < entryCount; ++i) {
+                    WORD typeOffset = entry[i];
+                    WORD type = typeOffset >> 12;
+                    WORD off  = typeOffset & 0x0FFF;
+                    if (type == IMAGE_REL_BASED_DIR64) {
+                        ULONGLONG* localPtr = reinterpret_cast<ULONGLONG*>(const_cast<BYTE*>(image.data()) + block->VirtualAddress + off);
+                        ULONGLONG patched = *localPtr + delta;
+                        LPVOID remotePtr = static_cast<BYTE*>(remoteBase) + block->VirtualAddress + off;
+                        WriteProcessMemory(proc, remotePtr, &patched, sizeof(patched), nullptr);
+                    }
+                }
+                offset += block->SizeOfBlock;
+            }
+        }
+    }
+
+    // Import resolution
+    const auto& importDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (importDir.Size) {
+        auto* desc = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(image.data() + importDir.VirtualAddress);
+        while (desc->Name) {
+            const char* modName = reinterpret_cast<const char*>(image.data() + desc->Name);
+            HMODULE mod = LoadLibraryA(modName);
+            if (!mod) {
+                std::cout << "[!] ManualMap: failed to load import module " << modName << "\n";
+                VirtualFreeEx(proc, remoteBase, 0, MEM_RELEASE);
+                return false;
+            }
+
+            auto* thunk = reinterpret_cast<const IMAGE_THUNK_DATA64*>(image.data() + desc->OriginalFirstThunk);
+            auto* firstThunk = reinterpret_cast<ULONGLONG*>(const_cast<BYTE*>(image.data()) + desc->FirstThunk);
+            SIZE_T idx = 0;
+            while (thunk && thunk->u1.AddressOfData) {
+                FARPROC fn = nullptr;
+                if (thunk->u1.Ordinal & IMAGE_ORDINAL_FLAG64) {
+                    fn = GetProcAddress(mod, reinterpret_cast<LPCSTR>(thunk->u1.Ordinal & 0xFFFF));
+                } else {
+                    auto* importByName = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(image.data() + thunk->u1.AddressOfData);
+                    fn = GetProcAddress(mod, importByName->Name);
+                }
+                if (!fn) {
+                    std::cout << "[!] ManualMap: unresolved import in module " << modName << "\n";
+                    VirtualFreeEx(proc, remoteBase, 0, MEM_RELEASE);
+                    return false;
+                }
+                ULONGLONG remoteThunkVal = reinterpret_cast<ULONGLONG>(fn);
+                LPVOID remoteThunkPtr = static_cast<BYTE*>(remoteBase) + desc->FirstThunk + idx * sizeof(ULONGLONG);
+                WriteProcessMemory(proc, remoteThunkPtr, &remoteThunkVal, sizeof(remoteThunkVal), nullptr);
+                ++idx;
+                ++thunk;
+            }
+            ++desc;
+        }
+    }
+
+    // Set final protections (simple heuristic)
+    section = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section) {
+        DWORD protect = PAGE_READONLY;
+        bool executable = (section->Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0;
+        bool readable   = (section->Characteristics & IMAGE_SCN_MEM_READ) != 0;
+        bool writable   = (section->Characteristics & IMAGE_SCN_MEM_WRITE) != 0;
+        if (executable) {
+            protect = writable ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ;
+        } else {
+            protect = writable ? PAGE_READWRITE : PAGE_READONLY;
+        }
+        DWORD oldProt;
+        VirtualProtectEx(proc, static_cast<BYTE*>(remoteBase) + section->VirtualAddress, section->Misc.VirtualSize, protect, &oldProt);
+    }
+
+    LPTHREAD_START_ROUTINE entry = reinterpret_cast<LPTHREAD_START_ROUTINE>(static_cast<BYTE*>(remoteBase) + nt->OptionalHeader.AddressOfEntryPoint);
+    HANDLE hThread = CreateRemoteThread(proc, nullptr, 0, entry, remoteBase, 0, nullptr);
+    if (!hThread) {
+        std::cout << "[!] ManualMap: CreateRemoteThread failed. Error: " << GetLastError() << "\n";
+        VirtualFreeEx(proc, remoteBase, 0, MEM_RELEASE);
+        return false;
+    }
+    WaitForSingleObject(hThread, INFINITE);
+    CloseHandle(hThread);
+
+    remoteBaseOut = remoteBase;
+    return true;
+}
+
 // Get alternative process names for known executables
 std::vector<std::string> GetAlternativeProcessNames(const std::string& exeName) {
     std::vector<std::string> alternatives;
@@ -79,15 +225,32 @@ std::vector<std::string> GetAlternativeProcessNames(const std::string& exeName) 
 int main(int argc, char* argv[]) {
     SetConsoleTitleA("3leghorse Launcher");
 
+    // If no DLL provided, try sensible defaults (current dir, then repo /build)
+    std::string dllPathUtf8;
     if (argc < 2) {
-        std::cout << "Usage: launcher.exe <dll_path> [process_name_or_exe]\n";
-        std::cout << "Example: launcher.exe 3leghorse.dll PlayGTAV.exe\n";
-        std::cout << "Press Enter to exit...\n";
-        std::cin.get();
-        return 1;
+        std::vector<fs::path> candidates = {
+            fs::current_path() / "YimMenuCustom.dll",
+            fs::current_path() / "3leghorse.dll",
+            fs::current_path().parent_path().parent_path() / "build" / "YimMenuCustom.dll"
+        };
+        for (const auto& c : candidates) {
+            if (fs::exists(c)) {
+                dllPathUtf8 = c.string();
+                std::cout << "[+] No DLL arg given, using found DLL: " << dllPathUtf8 << "\n";
+                break;
+            }
+        }
+        if (dllPathUtf8.empty()) {
+            std::cout << "Usage: launcher.exe <dll_path> [process_name_or_exe]\n";
+            std::cout << "Example: launcher.exe 3leghorse.dll PlayGTAV.exe\n";
+            std::cout << "Press Enter to exit...\n";
+            std::cin.get();
+            return 1;
+        }
+    } else {
+        dllPathUtf8 = argv[1];
     }
 
-    std::string dllPathUtf8 = argv[1];
     fs::path dllPath = fs::path(dllPathUtf8);  // Handles UTF-8 correctly without u8path
 
     std::string targetArg = (argc >= 3) ? argv[2] : "PlayGTAV.exe";
@@ -206,20 +369,42 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    bool injected = false;
     HANDLE thread = CreateRemoteThread(proc, nullptr, 0, (LPTHREAD_START_ROUTINE)LoadLibraryA, alloc, 0, nullptr);
     if (thread) {
         WaitForSingleObject(thread, INFINITE);
         CloseHandle(thread);
         std::cout << "[+] Injected successfully via LoadLibrary!\n";
+        injected = true;
     } else {
         std::cout << "[!] LoadLibrary injection failed. Error: " << GetLastError() << "\n";
-        std::cout << "[!] Manual map fallback not implemented yet.\n";
     }
 
     VirtualFreeEx(proc, alloc, 0, MEM_RELEASE);
+
+    if (!injected) {
+        std::vector<BYTE> image;
+        if (!ReadDLL(dllPathStr, image)) {
+            std::cout << "[!] Manual map: failed to read DLL file\n";
+        } else {
+            LPVOID remoteBase = nullptr;
+            std::cout << "[+] Attempting manual map fallback...\n";
+            if (ManualMap64(proc, image, remoteBase)) {
+                injected = true;
+                std::cout << "[+] Manual map succeeded at base " << remoteBase << "\n";
+            } else {
+                std::cout << "[!] Manual map failed.\n";
+            }
+        }
+    }
+
     CloseHandle(proc);
 
-    std::cout << "\n[+] Injection complete. Press Enter to exit...\n";
+    if (injected) {
+        std::cout << "\n[+] Injection complete. Press Enter to exit...\n";
+    } else {
+        std::cout << "\n[!] Injection failed. Press Enter to exit...\n";
+    }
     std::cin.get();
-    return 0;
+    return injected ? 0 : 1;
 }

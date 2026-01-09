@@ -21,8 +21,8 @@ bool on_present(IDXGISwapChain* swap_chain) {
     static int frame_count = 0;
     frame_count++;
 
-    // Debug output every 100 frames to avoid spam
-    if (frame_count % 100 == 0) {
+    // More frequent debug output - every 10 frames instead of 100
+    if (frame_count % 10 == 0) {
         char buf[128];
         sprintf(buf, "[hook_helpers] on_present called - frame %d, initialized: %d\n", frame_count, initialized);
         OutputDebugStringA(buf);
@@ -45,7 +45,7 @@ bool on_present(IDXGISwapChain* swap_chain) {
                     OutputDebugStringA("[hook_helpers] ImGui initialization failed\n");
                 }
             }
-            ok = renderer::on_present();
+            ok = renderer::on_present(swap_chain);
         }
     }
 

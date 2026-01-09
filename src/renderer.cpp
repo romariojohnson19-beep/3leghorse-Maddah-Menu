@@ -25,6 +25,7 @@
 #include "protections.hpp"
 #include "menu_stub.hpp"
 #include "native_interface.hpp"
+#include <d3d11.h>
 
 struct Toast {
     uint64_t event_hash;
@@ -37,6 +38,7 @@ static std::vector<Toast> g_toasts;
 static double g_last_toast_time = 0.0;
 static bool g_imgui_ready = false;
 static bool g_warned_not_ready = false;
+static ID3D11RenderTargetView* g_rtv = nullptr;
 
 namespace renderer {
 
@@ -78,7 +80,53 @@ void imgui_shutdown() {
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
+    if (g_rtv) {
+        g_rtv->Release();
+        g_rtv = nullptr;
+    }
     g_imgui_ready = false;
+}
+
+static bool ensure_render_target(IDXGISwapChain* swap_chain) {
+    if (g_rtv) return true;
+    if (!swap_chain) return false;
+
+    ID3D11Texture2D* back_buffer = nullptr;
+    ID3D11Device* device = nullptr;
+    if (FAILED(swap_chain->GetDevice(__uuidof(ID3D11Device), (void**)&device)) || !device) {
+        OutputDebugStringA("[renderer] ensure_render_target: failed to get device\n");
+        return false;
+    }
+
+    HRESULT hr = swap_chain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&back_buffer);
+    if (FAILED(hr) || !back_buffer) {
+        device->Release();
+        OutputDebugStringA("[renderer] ensure_render_target: failed to get back buffer\n");
+        return false;
+    }
+
+    hr = device->CreateRenderTargetView(back_buffer, nullptr, &g_rtv);
+    back_buffer->Release();
+    device->Release();
+
+    if (FAILED(hr) || !g_rtv) {
+        OutputDebugStringA("[renderer] ensure_render_target: failed to create RTV\n");
+        return false;
+    }
+    OutputDebugStringA("[renderer] ensure_render_target: RTV created\n");
+    return true;
+}
+
+void on_resize_begin() {
+    if (g_rtv) {
+        g_rtv->Release();
+        g_rtv = nullptr;
+        OutputDebugStringA("[renderer] on_resize_begin: RTV released\n");
+    }
+}
+
+void on_resize_end(IDXGISwapChain* swap_chain) {
+    ensure_render_target(swap_chain);
 }
 
 void set_theme_gold_black() {
@@ -138,12 +186,18 @@ void draw_overlay() {
     }
 }
 
-bool on_present() {
+bool on_present(IDXGISwapChain* swap_chain) {
     if (!g_initialized || !g_imgui_ready) {
         if (!g_warned_not_ready) {
             OutputDebugStringA("[renderer] on_present called before imgui_init\n");
             g_warned_not_ready = true;
         }
+        return false;
+    }
+
+    // Ensure RTV exists (creates once per swapchain, recreated after resize)
+    if (!ensure_render_target(swap_chain)) {
+        OutputDebugStringA("[renderer] on_present: failed to ensure RTV\n");
         return false;
     }
 
@@ -157,7 +211,17 @@ bool on_present() {
 
     ImGui::EndFrame();
     ImGui::Render();
+    ID3D11DeviceContext* ctx = nullptr;
+    ID3D11Device* dev = nullptr;
+    if (SUCCEEDED(swap_chain->GetDevice(__uuidof(ID3D11Device), (void**)&dev)) && dev) {
+        dev->GetImmediateContext(&ctx);
+    }
+    if (ctx && g_rtv) {
+        ctx->OMSetRenderTargets(1, &g_rtv, nullptr);
+    }
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    if (ctx) ctx->Release();
+    if (dev) dev->Release();
     return true;
 }
 
@@ -174,13 +238,16 @@ void notify_blocked_event(uint64_t event_hash, uint32_t total_blocked) {
 #else // no ImGui available -> stubs
 
 #include <stdio.h>
+struct IDXGISwapChain;
 
 namespace renderer {
 void init() { OutputDebugStringA("[3leghorse] renderer stub init\n"); }
 void shutdown() { OutputDebugStringA("[3leghorse] renderer stub shutdown\n"); }
 void set_theme_gold_black() { }
 void draw_overlay() { OutputDebugStringA("[3leghorse] 3leghorse Menu v1.0 (stub)\n"); }
-bool on_present() { return false; }
+bool on_present(IDXGISwapChain*) { return false; }
+void on_resize_begin() {}
+void on_resize_end(IDXGISwapChain*) {}
 void notify_blocked_event(uint64_t event_hash, uint32_t total_blocked) {
     char buf[128]; sprintf(buf, "[3leghorse] Blocked event 0x%llX total=%u\n", (unsigned long long)event_hash, (unsigned)total_blocked); OutputDebugStringA(buf);
 }
