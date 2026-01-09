@@ -13,7 +13,7 @@ struct Theme {
 
 struct Settings {
     Theme theme;
-    int toggle_hotkey = 0x7A; // F11 default
+    int toggle_hotkey = 0x76; // F7 default
     bool reset_blocked_on_session = true;
 };
 
