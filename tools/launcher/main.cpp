@@ -224,11 +224,11 @@ std::vector<std::string> GetAlternativeProcessNames(const std::string& exeName) 
 
 // Function to run a command and wait
 bool RunCommand(const std::string& cmd, const std::string& cwd = "") {
-    std::string params = "/c " + cmd;
+    std::string params = "-c " + cmd;
     SHELLEXECUTEINFOA sei = { sizeof(sei) };
     sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
     sei.lpVerb = "open";
-    sei.lpFile = "cmd.exe";
+    sei.lpFile = "C:\\msys64\\usr\\bin\\bash.exe";
     sei.lpParameters = params.c_str();
     sei.lpDirectory = cwd.empty() ? nullptr : cwd.c_str();
     sei.nShow = SW_HIDE;
@@ -269,7 +269,7 @@ bool BuildDLL() {
     }
 
     // Run cmake configure
-    std::string cmakeCmd = "C:\\msys64\\mingw64\\bin\\cmake.exe -B \"" + buildDir.string() + "\" -S \"" + rootDir.string() + "\"";
+    std::string cmakeCmd = "cmake -B \"" + buildDir.string() + "\" -S \"" + rootDir.string() + "\"";
     std::cout << "[+] Running: " << cmakeCmd << "\n";
     if (!RunCommand(cmakeCmd)) {
         std::cout << "[!] CMake configure failed\n";
@@ -277,7 +277,7 @@ bool BuildDLL() {
     }
 
     // Run cmake build
-    std::string buildCmd = "C:\\msys64\\mingw64\\bin\\cmake.exe --build \"" + buildDir.string() + "\" --config Release";
+    std::string buildCmd = "cmake --build \"" + buildDir.string() + "\" --config Release";
     std::cout << "[+] Running: " << buildCmd << "\n";
     if (!RunCommand(buildCmd)) {
         std::cout << "[!] CMake build failed\n";
@@ -295,9 +295,9 @@ int main(int argc, char* argv[]) {
     std::string dllPathUtf8;
     if (argc < 2) {
         std::vector<fs::path> candidates = {
-            fs::current_path() / "YimMenuCustom.dll",
             fs::current_path() / "3leghorse.dll",
-            fs::current_path().parent_path().parent_path() / "build" / "YimMenuCustom.dll"
+            fs::current_path() / "YimMenuCustom.dll",
+            fs::current_path().parent_path().parent_path() / "build" / "3leghorse.dll"
         };
         for (const auto& c : candidates) {
             if (fs::exists(c)) {
@@ -331,6 +331,28 @@ int main(int argc, char* argv[]) {
     }
 
     fs::path dllPath = fs::path(dllPathUtf8);  // Handles UTF-8 correctly without u8path
+
+    std::cout << "[+] Resolving DLL path: " << dllPath << "\n";
+
+    if (!fs::exists(dllPath)) {
+        std::cout << "[!] DLL not found: " << dllPath << "\n";
+        // Try to build the DLL
+        if (BuildDLL()) {
+            if (fs::exists(dllPath)) {
+                std::cout << "[+] Using built DLL: " << dllPath << "\n";
+            } else {
+                std::cout << "[!] DLL still not found after build\n";
+                std::cout << "Press Enter to exit...\n";
+                std::cin.get();
+                return 1;
+            }
+        } else {
+            std::cout << "[!] Build failed\n";
+            std::cout << "Press Enter to exit...\n";
+            std::cin.get();
+            return 1;
+        }
+    }
 
     std::string targetArg = (argc >= 3) ? argv[2] : "PlayGTAV.exe";
 
