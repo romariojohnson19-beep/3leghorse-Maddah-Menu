@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
+#include <Psapi.h>
 
 #include <atomic>
 #include <cstdio>
@@ -44,67 +45,35 @@ static WNDPROC g_orig_wndproc     = nullptr;
 static HWND g_hwnd                = nullptr;
 static std::atomic<IDXGISwapChain*> g_swap_chain{nullptr};
 
-static std::vector<int> pattern_to_bytes(const char* pattern) {
-    std::vector<int> bytes;
-    const char* end = pattern + std::strlen(pattern);
-    for (const char* current = pattern; current < end; ++current) {
-        if (*current == ' ') continue;
-        if (*current == '?') {
-            ++current; // skip second '?' if present
-            bytes.push_back(-1);
-        } else {
-            char* next = nullptr;
-            bytes.push_back(static_cast<int>(std::strtoul(current, &next, 16)));
-            current = next - 1;
-        }
-    }
-    return bytes;
-}
-
-static uintptr_t find_pattern(const char* module_name, const char* signature) {
-    HMODULE mod = module_name ? GetModuleHandleA(module_name) : GetModuleHandleA(nullptr);
-    if (!mod) return 0;
-
-    auto* dos = reinterpret_cast<PIMAGE_DOS_HEADER>(mod);
-    auto* nt  = reinterpret_cast<PIMAGE_NT_HEADERS>(reinterpret_cast<uint8_t*>(mod) + dos->e_lfanew);
-    size_t size = nt->OptionalHeader.SizeOfImage;
-    auto* data  = reinterpret_cast<uint8_t*>(mod);
-
-    auto bytes = pattern_to_bytes(signature);
-    size_t bytes_size = bytes.size();
-
-    for (size_t i = 0; i + bytes_size < size; ++i) {
-        bool found = true;
-        for (size_t j = 0; j < bytes_size; ++j) {
-            if (bytes[j] != -1 && data[i + j] != bytes[j]) {
-                found = false;
-                break;
-            }
-        }
-        if (found) {
-            return reinterpret_cast<uintptr_t>(&data[i]);
-        }
-    }
-    return 0;
-}
-
 static IDXGISwapChain* resolve_swapchain_from_pattern() {
-    // Signature taken from YimMenu swapchain pointer (Legacy): 48 8B 0D ? ? ? ? 48 8B 01 44 8D 43 01 33 D2 FF 50 40 8B C8
-    constexpr const char* k_swap_sig = "48 8B 0D ? ? ? ? 48 8B 01 44 8D 43 01 33 D2 FF 50 40 8B C8";
-    uintptr_t addr = find_pattern(nullptr, k_swap_sig);
-    if (!addr) {
-        OutputDebugStringA("[present_hook] swapchain pattern not found\n");
-        return nullptr;
+    const uint8_t pattern[] = { 0x48, 0x8B, 0x05, 0, 0, 0, 0, 0x48, 0x85, 0xC0, 0x74, 0x0F, 0x48, 0x8B, 0x88 };
+    const char mask[]       = "xxx????xxx";
+
+    MODULEINFO mod{};
+    GetModuleInformation(GetCurrentProcess(), GetModuleHandle(nullptr), &mod, sizeof(mod));
+    auto start = reinterpret_cast<uint8_t*>(mod.lpBaseOfDll);
+    auto end   = start + mod.SizeOfImage - sizeof(pattern);
+
+    for (auto p = start; p < end; ++p) {
+        size_t i = 0;
+        for (; i < sizeof(pattern); ++i) {
+            if (mask[i] == '?') continue;
+            if (p[i] != pattern[i]) break;
+        }
+        if (i == sizeof(pattern)) {
+            auto rip_disp = *reinterpret_cast<int32_t*>(p + 3);
+            auto rip      = reinterpret_cast<uintptr_t>(p + 7 + rip_disp);
+            auto swap_ptr = reinterpret_cast<IDXGISwapChain**>(rip);
+            IDXGISwapChain* sc = swap_ptr ? *swap_ptr : nullptr;
+
+            char buf[200];
+            sprintf(buf, "[present_hook] swapchain pattern resolved ptr=%p swapchain=%p\n", swap_ptr, sc);
+            OutputDebugStringA(buf);
+            return sc;
+        }
     }
-
-    int32_t rip = *reinterpret_cast<int32_t*>(addr + 3);
-    auto swap_ptr = reinterpret_cast<IDXGISwapChain**>(addr + 7 + rip);
-    IDXGISwapChain* sc = swap_ptr ? *swap_ptr : nullptr;
-
-    char buf[200];
-    sprintf(buf, "[present_hook] swapchain pattern resolved ptr=%p swapchain=%p\n", swap_ptr, sc);
-    OutputDebugStringA(buf);
-    return sc;
+    OutputDebugStringA("[present_hook] swapchain pattern not found\n");
+    return nullptr;
 }
 
 LRESULT CALLBACK wndproc_hook(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -145,13 +114,13 @@ static bool install_swapchain_hooks(IDXGISwapChain* swap_chain) {
     sprintf(buf, "[present_hook] Installing hooks on real swapchain=%p (Present=%p, ResizeBuffers=%p)\n", swap_chain, present_target, resize_target);
     OutputDebugStringA(buf);
 
-    if (MH_CreateHook(present_target, &hk_present, reinterpret_cast<void**>(&g_orig_present)) != MH_OK ||
+    if (MH_CreateHook(present_target, reinterpret_cast<LPVOID>(&hk_present), reinterpret_cast<void**>(&g_orig_present)) != MH_OK ||
         MH_EnableHook(present_target) != MH_OK) {
         OutputDebugStringA("[present_hook] Failed to hook Present on real swapchain\n");
         return false;
     }
 
-    if (MH_CreateHook(resize_target, &hk_resizebuffers, reinterpret_cast<void**>(&g_orig_resize)) != MH_OK ||
+    if (MH_CreateHook(resize_target, reinterpret_cast<LPVOID>(&hk_resizebuffers), reinterpret_cast<void**>(&g_orig_resize)) != MH_OK ||
         MH_EnableHook(resize_target) != MH_OK) {
         OutputDebugStringA("[present_hook] Failed to hook ResizeBuffers on real swapchain\n");
         MH_RemoveHook(present_target);
