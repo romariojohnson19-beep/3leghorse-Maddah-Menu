@@ -77,8 +77,10 @@ static IDXGISwapChain* resolve_swapchain_from_pattern() {
 }
 
 LRESULT CALLBACK wndproc_hook(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam); // Let ImGui process input
-    return CallWindowProc(g_orig_wndproc, hWnd, msg, wParam, lParam); // Always pass to game (no pause)
+    if (hook_helpers::on_wndproc(hWnd, msg, wParam, lParam)) {
+        return 1; // ImGui consumed input
+    }
+    return CallWindowProc(g_orig_wndproc, hWnd, msg, wParam, lParam);
 }
 
 static void install_wndproc_if_needed(IDXGISwapChain* swap_chain) {

@@ -55,7 +55,8 @@ bool on_present(IDXGISwapChain* swap_chain) {
 }
 
 bool on_wndproc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    return ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
+    ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
+    return false; // Don't consume input, pass to game too (no pause)
 }
 
 } // namespace hook_helpers
