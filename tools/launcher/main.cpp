@@ -224,26 +224,27 @@ std::vector<std::string> GetAlternativeProcessNames(const std::string& exeName) 
 
 // Function to run a command and wait
 bool RunCommand(const std::string& cmd, const std::string& cwd = "") {
-    STARTUPINFOA si = { sizeof(si) };
-    PROCESS_INFORMATION pi;
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE; // Hide the console window
+    std::string params = "/c " + cmd;
+    SHELLEXECUTEINFOA sei = { sizeof(sei) };
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+    sei.lpVerb = "open";
+    sei.lpFile = "cmd.exe";
+    sei.lpParameters = params.c_str();
+    sei.lpDirectory = cwd.empty() ? nullptr : cwd.c_str();
+    sei.nShow = SW_HIDE;
 
-    std::string fullCmd = "cmd.exe /c " + cmd;
-    char* cmdLine = _strdup(fullCmd.c_str());
-
-    if (!CreateProcessA(nullptr, cmdLine, nullptr, nullptr, FALSE, 0, nullptr, cwd.empty() ? nullptr : cwd.c_str(), &si, &pi)) {
-        free(cmdLine);
+    if (!ShellExecuteExA(&sei)) {
         return false;
     }
 
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD exitCode;
-    GetExitCodeProcess(pi.hProcess, &exitCode);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    free(cmdLine);
-    return exitCode == 0;
+    if (sei.hProcess) {
+        WaitForSingleObject(sei.hProcess, INFINITE);
+        DWORD exitCode;
+        GetExitCodeProcess(sei.hProcess, &exitCode);
+        CloseHandle(sei.hProcess);
+        return exitCode == 0;
+    }
+    return false;
 }
 
 // Function to build the DLL
@@ -268,7 +269,7 @@ bool BuildDLL() {
     }
 
     // Run cmake configure
-    std::string cmakeCmd = "\"C:\\msys64\\mingw64\\bin\\cmake.exe\" -B \"" + buildDir.string() + "\" -S \"" + rootDir.string() + "\"";
+    std::string cmakeCmd = "C:\\msys64\\mingw64\\bin\\cmake.exe -B \"" + buildDir.string() + "\" -S \"" + rootDir.string() + "\"";
     std::cout << "[+] Running: " << cmakeCmd << "\n";
     if (!RunCommand(cmakeCmd)) {
         std::cout << "[!] CMake configure failed\n";
@@ -276,7 +277,7 @@ bool BuildDLL() {
     }
 
     // Run cmake build
-    std::string buildCmd = "\"C:\\msys64\\mingw64\\bin\\cmake.exe\" --build \"" + buildDir.string() + "\" --config Release";
+    std::string buildCmd = "C:\\msys64\\mingw64\\bin\\cmake.exe --build \"" + buildDir.string() + "\" --config Release";
     std::cout << "[+] Running: " << buildCmd << "\n";
     if (!RunCommand(buildCmd)) {
         std::cout << "[!] CMake build failed\n";
