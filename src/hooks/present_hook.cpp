@@ -46,8 +46,10 @@ static HWND g_hwnd                = nullptr;
 static std::atomic<IDXGISwapChain*> g_swap_chain{nullptr};
 
 static IDXGISwapChain* resolve_swapchain_from_pattern() {
-    const uint8_t pattern[] = { 0x48, 0x8B, 0x05, 0, 0, 0, 0, 0x48, 0x85, 0xC0, 0x74, 0x0F, 0x48, 0x8B, 0x88 };
-    const char mask[]       = "xxx????xxxxxxxxx";
+    OutputDebugStringA("[present_hook] scanning for swapchain pattern (MR-X signature)\\n");
+    // MR-X fork swapchain signature: 48 8B 05 ? ? ? ? 48 8B 88 58 01 00 00
+    const uint8_t pattern[] = { 0x48, 0x8B, 0x05, 0, 0, 0, 0, 0x48, 0x8B, 0x88, 0x58, 0x01, 0x00, 0x00 };
+    const char mask[]       = "xxx????xxxxxxx";
 
     MODULEINFO mod{};
     GetModuleInformation(GetCurrentProcess(), GetModuleHandle(nullptr), &mod, sizeof(mod));
@@ -136,6 +138,7 @@ static bool install_swapchain_hooks(IDXGISwapChain* swap_chain) {
 }
 
 HRESULT __stdcall hk_present(IDXGISwapChain* swap_chain, UINT sync_interval, UINT flags) {
+    OutputDebugStringA("[present_hook] hk_present entered\n");
     if (flags & DXGI_PRESENT_TEST) {
         return g_orig_present ? g_orig_present(swap_chain, sync_interval, flags) : S_OK;
     }
@@ -144,6 +147,7 @@ HRESULT __stdcall hk_present(IDXGISwapChain* swap_chain, UINT sync_interval, UIN
 
     // Ensure we install on the exact swapchain instance we see in the first real Present.
     if (!g_hooks_installed.load(std::memory_order_acquire) && swap_chain) {
+        OutputDebugStringA("[present_hook] installing hooks from hk_present path\n");
         install_swapchain_hooks(swap_chain);
     }
 
@@ -167,6 +171,7 @@ namespace hooks {
 
 bool init_present_hook(IDXGISwapChain* swap_chain) {
 #if HAVE_MINHOOK
+    OutputDebugStringA("[hooks] init_present_hook called\n");
     if (!g_min_hook_ready.load(std::memory_order_acquire)) {
         MH_STATUS init_status = MH_Initialize();
         if (init_status != MH_OK && init_status != MH_ERROR_ALREADY_INITIALIZED) {
@@ -184,6 +189,7 @@ bool init_present_hook(IDXGISwapChain* swap_chain) {
         return false;
     }
 
+    OutputDebugStringA("[hooks] init_present_hook: installing hooks\n");
     return install_swapchain_hooks(target);
 #else
     OutputDebugStringA("[hooks] MinHook not available; present hook not installed\n");

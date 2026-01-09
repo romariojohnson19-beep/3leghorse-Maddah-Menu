@@ -144,35 +144,50 @@ void draw_overlay() {
 
     OutputDebugStringA("[renderer] Drawing overlay\n");
 
-    // Make overlay more visible - position it prominently
-    ImGui::SetNextWindowPos(ImVec2(50, 50), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(400, 200), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.9f); // More opaque
-    
-    ImGui::Begin("3leghorse Overlay", nullptr,
-        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings |
-        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
-    
-    // Test message - make it very visible and large
-    ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[0]); // Default font
-    ImGui::SetWindowFontScale(1.5f); // Make text larger
-    
-    ImGui::TextColored(ImVec4(1,0,0,1), "=== 3LEGHORSE MENU LOADED ===");
-    ImGui::TextColored(ImVec4(0,1,0,1), "Press F9 to toggle visibility");
-    ImGui::TextColored(ImVec4(1,1,1,1), "If you can see this, ImGui is working!");
+    // Float the main window near the top-left but let users move it; first-use positions only
+    ImGui::SetNextWindowPos(ImVec2(40, 40), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(520, 320), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowBgAlpha(0.92f);
+
+    ImGui::Begin("3leghorse Menu", nullptr,
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_MenuBar);
+
+    if (ImGui::BeginMenuBar()) {
+        ImGui::TextColored(ImVec4(0.9f, 0.8f, 0.f, 1.f), "3LEGHORSE");
+        ImGui::SameLine();
+        ImGui::Text("ImGui: %s | RTV: %s", g_imgui_ready ? "ready" : "init", g_rtv ? "ok" : "none");
+        ImGui::SameLine();
+        ImGui::Text("Blocked: %u", protections::blocked_count());
+        ImGui::EndMenuBar();
+    }
+
+    const auto hotkey = cfg::get().toggle_hotkey;
+
+    ImGui::TextColored(ImVec4(0.6f, 1.f, 0.6f, 1.f), "Overlay visible: %s", menu_stub::overlay_visible() ? "YES" : "NO");
+    ImGui::SameLine();
+    ImGui::Text("Toggle key: 0x%X (F9 in config)", hotkey);
     ImGui::Separator();
-    ImGui::Text("3leghorse Menu v1.0");
-    ImGui::TextColored(ImVec4(1,1,0,1), "Blocked Events: %u", protections::blocked_count());
-    
+
+    ImGui::Columns(2, nullptr, false);
+    ImGui::TextColored(ImVec4(0.8f, 0.9f, 1.f, 1.f), "Actions");
     ImGui::Separator();
-    ImGui::Text("Features:");
     menu_stub::for_each_feature([](menu_stub::Feature& f) {
         ImGui::Checkbox(f.name, &f.enabled);
     });
-    
-    ImGui::SetWindowFontScale(1.0f); // Reset scale
-    ImGui::PopFont();
-    
+
+    ImGui::NextColumn();
+    ImGui::TextColored(ImVec4(0.8f, 0.9f, 1.f, 1.f), "Status");
+    ImGui::Separator();
+    ImGui::Text("Present hook: live (DX11)");
+    ImGui::Text("RTV ready: %s", g_rtv ? "yes" : "pending");
+    ImGui::Text("Blocked events: %u", protections::blocked_count());
+    ImGui::Spacing();
+    ImGui::TextWrapped("Tips: open GTA V windowed/borderless to see overlay. If you don't see this window, check DebugView for [present_hook] logs and confirm the DLL is injected.");
+
+    ImGui::Columns(1);
+
+    ImGui::Separator();
+    ImGui::TextColored(g_gold, "Build: Maddah Menu | DX11 overlay | Hotkey F9");
     ImGui::End();
 
     // Toast stack

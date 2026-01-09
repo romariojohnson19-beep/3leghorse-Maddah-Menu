@@ -14,7 +14,7 @@ option(ENABLE_SCRIPTHOOKV "Enable ScriptHookV + MinHook integration" ON)
 set(SHV_DIR "" CACHE PATH "Path to ScriptHookV SDK root (contains inc/natives.h)" )
 set(MINHOOK_DIR "" CACHE PATH "Path to MinHook root (contains include/MinHook.h)" )
 
-option(ENABLE_IMGUI "Enable ImGui + renderer integration" OFF)
+option(ENABLE_IMGUI "Enable ImGui + renderer integration" ON)
 set(IMGUI_DIR "" CACHE PATH "Path to ImGui root (contains imgui.h)" )
 
 if(ENABLE_IMGUI)
