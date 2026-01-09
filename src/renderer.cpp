@@ -164,6 +164,12 @@ void draw_overlay() {
     ImGui::Text("3leghorse Menu v1.0");
     ImGui::TextColored(ImVec4(1,1,0,1), "Blocked Events: %u", protections::blocked_count());
     
+    ImGui::Separator();
+    ImGui::Text("Features:");
+    menu_stub::for_each_feature([](menu_stub::Feature& f) {
+        ImGui::Checkbox(f.name, &f.enabled);
+    });
+    
     ImGui::SetWindowFontScale(1.0f); // Reset scale
     ImGui::PopFont();
     
